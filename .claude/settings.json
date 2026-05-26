@@ -60,8 +60,6 @@
             "Bash(git checkout .*)",
             "Bash(git clean -*)",
             "Bash(git rebase *)",
-            "Write(~/**)",
-            "Edit(~/**)",
             "Read(~/.claude/projects/**)",
             "Read(~/.claude/plans/**)"
         ],
