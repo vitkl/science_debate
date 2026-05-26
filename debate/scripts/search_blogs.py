@@ -34,11 +34,12 @@ def _load_registry(registry_path: Path) -> dict[str, list[str]]:
 
 
 def _matches_keywords(text: str, keywords: dict[str, Any]) -> bool:
+    """Return True if any primary term or synonym appears in text."""
     haystack = text.lower()
     primary = [t.lower() for t in keywords.get("primary_terms", [])]
     synonyms = [t.lower() for t in keywords.get("synonyms", [])]
     if not primary and not synonyms:
-        return True  # no keywords given → keep everything
+        return False  # cannot match without keywords; caller decides tier
     return any(term in haystack for term in primary + synonyms)
 
 
@@ -56,6 +57,12 @@ def _extract_links(html: str, base_url: str) -> list[tuple[str, str]]:
 
 
 def _crawl_blog_index(index_url: str, keywords: dict[str, Any], max_posts: int = 40) -> list[dict[str, str]]:
+    """Crawl the index page; keep ALL posts (registered blog = author-confirmed).
+
+    Tier assignment: tier 1 if title hits a keyword, tier 2 otherwise. Built so
+    that ``build_briefing.py`` can split blog content into topic-relevant vs.
+    author-confirmed-only buckets matching the unified tier model.
+    """
     try:
         response = http_get(index_url)
     except Exception as exc:  # noqa: BLE001
@@ -63,12 +70,13 @@ def _crawl_blog_index(index_url: str, keywords: dict[str, Any], max_posts: int =
     html = response.text
     links = _extract_links(html, index_url)
     posts: list[dict[str, str]] = []
+    seen_urls: set[str] = set()
     for href, anchor in links:
-        if any(p["url"] == href for p in posts):
+        if href in seen_urls:
             continue
-        if not _matches_keywords(anchor, keywords):
-            continue
-        posts.append({"url": href, "title": anchor, "source": "blog", "key": url_hash(href)})
+        seen_urls.add(href)
+        tier = 1 if _matches_keywords(anchor, keywords) else 2
+        posts.append({"url": href, "title": anchor, "source": "blog", "tier": tier, "key": url_hash(href)})
         if len(posts) >= max_posts:
             break
     return posts
@@ -80,14 +88,24 @@ def main(
     *,
     keywords: str,
     registry: str = "debate/blog_registry.yaml",
+    urls: str | None = None,
     discover: bool = False,
 ) -> Path:
-    """Find matching blog posts for ``scientist``; write the result to ``out``."""
+    """Crawl blog index pages for posts authored by ``scientist`` and tier-tag them.
+
+    URL source resolution (highest precedence first):
+      1. ``--urls "u1,u2,..."`` — Moderator-confirmed list (after asking the user).
+         This is the recommended path: the Moderator does a WebSearch for blogs
+         by the scientist, presents candidates via AskUserQuestion, then passes
+         the user-confirmed subset here.
+      2. ``--registry blog_registry.yaml`` lookup by scientist name — only used
+         when ``--urls`` is absent.
+      3. ``--discover`` — emit a web-search query suggestion (for manual flows).
+    """
     keywords_data: dict[str, Any] = load_json(Path(keywords))
     registry_path = Path(registry)
     if not registry_path.is_absolute():
         registry_path = REPO_ROOT / registry_path
-    registry_map = _load_registry(registry_path)
 
     if discover:
         query = f'"{scientist}" (blog OR substack OR wordpress)'
@@ -95,30 +113,42 @@ def main(
             "scientist": scientist,
             "suggested_web_search": query,
             "registry_path": str(registry_path),
-            "note": "Add the scientist + URL(s) to the registry, then re-run without --discover.",
+            "note": "Run this WebSearch, present candidates to the user, then re-run with --urls 'u1,u2,...'.",
         }
         out_path = Path(out)
         atomic_write_json(out_path, suggestion)
         print(f"{out_path} (discovery suggestion)")
         return out_path
 
-    urls = registry_map.get(scientist) or []
-    posts: list[dict[str, str]] = []
-    if not urls:
+    if urls:
+        index_urls = [u.strip() for u in urls.split(",") if u.strip()]
+        url_source = "moderator-confirmed"
+    else:
+        registry_map = _load_registry(registry_path)
+        index_urls = registry_map.get(scientist) or []
+        url_source = "registry"
+
+    posts: list[dict[str, Any]] = []
+    if not index_urls:
         posts.append(
             {
-                "_warning": f"{scientist} not in {registry_path.name}; run with --discover to get a search query.",
+                "_warning": (
+                    f"No blog URLs for {scientist}. Use --discover for a search query, "
+                    f"present candidates to the user, then re-run with --urls 'u1,u2,...'."
+                ),
                 "url": "",
                 "title": "",
+                "tier": 2,
             }
         )
-    for index_url in urls:
+    for index_url in index_urls:
         posts.extend(_crawl_blog_index(index_url, keywords_data))
     out_path = Path(out)
     if "{scientist}" in str(out_path):
         out_path = Path(str(out_path).format(scientist=slug(scientist)))
-    atomic_write_json(out_path, posts)
-    print(f"{out_path} ({len(posts)} candidate posts)")
+    payload = {"scientist": scientist, "url_source": url_source, "index_urls": index_urls, "posts": posts}
+    atomic_write_json(out_path, payload)
+    print(f"{out_path} ({len(posts)} candidate posts from {len(index_urls)} index URLs; source={url_source})")
     return out_path
 
 

@@ -20,6 +20,7 @@ summarise Tier-3 abstracts in thematic batches, then surface the over-budget
 
 from __future__ import annotations
 
+import random
 from pathlib import Path
 from typing import Any
 
@@ -36,6 +37,7 @@ from _common import (
 WORDS_PER_FULL_PAPER = 4_000  # rough average used for capacity math
 WORDS_PER_ABSTRACT = 250
 SUMMARY_TARGET_WORDS = 500
+DEFAULT_TIER3_SAMPLE = 15  # random sample size for "neither author nor topic match"
 
 
 def _read_summary_or_fulltext(text_path: Path) -> tuple[str, bool]:
@@ -55,7 +57,14 @@ def _works_for(scientist: str) -> list[dict[str, Any]]:
 
 def _blogs_for(scientist: str) -> list[dict[str, Any]]:
     path = PAPERS_CACHE / "blogs" / f"{author_slug(scientist)}.json"
-    return load_json(path) if path.exists() else []
+    if not path.exists():
+        return []
+    payload = load_json(path)
+    # search_blogs.py now wraps posts in {scientist, url_source, index_urls, posts: [...]}.
+    # Old format was a bare list; keep backward compat for caches written by an earlier run.
+    if isinstance(payload, dict):
+        return payload.get("posts", [])
+    return payload
 
 
 def _transcripts_for(scientist: str) -> list[dict[str, Any]]:
@@ -125,53 +134,84 @@ def _custom_entries(custom_sources: list[dict[str, Any]]) -> list[tuple[int, str
     return out
 
 
+def _split_media_by_tier(items: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Split blog or video items by ``tier`` field. Untagged items default to tier 2 (author-confirmed)."""
+    tier1: list[dict[str, Any]] = []
+    tier2: list[dict[str, Any]] = []
+    for item in items:
+        t = item.get("tier", 2)
+        if t == 1:
+            tier1.append(item)
+        else:
+            tier2.append(item)
+    return tier1, tier2
+
+
 def _build_for_scientist(
     name: str,
     custom_sources: list[dict[str, Any]],
     *,
     n_full_papers_cap: int,
-    n_abstracts_cap: int,
+    n_tier3_sample: int,
 ) -> tuple[str, dict[str, Any], list[str]]:
-    """Return ``(briefing_markdown, manifest_for_this_scientist, needs_summary_paths)``."""
+    """Return ``(briefing_markdown, manifest_for_this_scientist, needs_summary_paths)``.
+
+    Tier model (unified across papers, blogs, videos):
+      - Tier 1: topic-matching (any source whose title/abstract/description/transcript
+        hits a primary keyword)
+      - Tier 2: author/speaker confirmed but no topic match (first/co-first/last/co-last
+        for papers; registered blog posts; YouTube videos where the scientist is the
+        confirmed speaker)
+      - Tier 3: neither — random sample of ``n_tier3_sample`` papers (default 15).
+        Only applies to papers; blogs and videos that aren't speaker-confirmed are
+        dropped upstream by their respective search scripts.
+    """
     works = sorted(_works_for(name), key=lambda r: r.get("year", ""), reverse=True)
-    tier1 = [w for w in works if w.get("tier") == 1]
-    tier2 = [w for w in works if w.get("tier") == 2]
-    tier3 = [w for w in works if w.get("tier") == 3]
+    tier1_works = [w for w in works if w.get("tier") == 1]
+    tier2_works = [w for w in works if w.get("tier") == 2]
+    tier3_works = [w for w in works if w.get("tier") == 3]
+    blogs = _blogs_for(name)
+    transcripts = _transcripts_for(name)
+    tier1_blogs, tier2_blogs = _split_media_by_tier(blogs)
+    tier1_videos, tier2_videos = _split_media_by_tier(transcripts)
     needs_summary: list[str] = []
 
     sections: list[str] = [f"# Briefing — {name}\n"]
     manifest: dict[str, Any] = {"name": name, "tier1": {}, "tier2": {}, "tier3": {}, "custom": {}}
 
-    # Tier 1 — full text always
+    # Tier 1 — topic-direct (papers + topic-matching blogs/videos)
     sections.append("## Tier 1: topic-direct\n")
     tier1_full = 0
-    for record in tier1:
-        text, text_path = _resolve_works_text(record)
+    for record in tier1_works:
+        text, _text_path = _resolve_works_text(record)
         include_full = bool(text)
         if include_full:
             tier1_full += 1
         sections.append(_format_work_entry(record, text, include_full=include_full))
-    blogs = _blogs_for(name)
-    transcripts = _transcripts_for(name)
-    if blogs or transcripts:
-        sections.append("\n### Blog posts and recorded talks\n")
-        for blog in blogs:
+    if tier1_blogs or tier1_videos:
+        sections.append("\n### Blog posts and recorded talks (topic-matching)\n")
+        for blog in tier1_blogs:
             if blog.get("url"):
                 sections.append(f"- {blog.get('title', '')} — {blog['url']}")
-        for video in transcripts:
+        for video in tier1_videos:
             sections.append(f"- {video.get('title', '')} — {video.get('url', '')}")
     manifest["tier1"] = {
-        "papers_total": len(tier1),
+        "papers_total": len(tier1_works),
         "papers_with_fulltext": tier1_full,
-        "blogs": len(blogs),
-        "transcripts": len(transcripts),
-        "sample_titles": [w.get("title", "") for w in tier1[:5]],
+        "blogs": len(tier1_blogs),
+        "videos": len(tier1_videos),
+        "sample_titles": [w.get("title", "") for w in tier1_works[:5]],
     }
 
-    # Tier 2 — abstracts always; full text up to cap; flag extras for summary
-    sections.append("\n## Tier 2: first/last-author\n")
+    # Tier 2 — split by signal type:
+    #   2a: first/last author (strong author signal, no topic match) — full text eligible
+    #   2b: middle author + topic match (weak author signal but topic-relevant) — abstract only
+    tier2a = [w for w in tier2_works if w.get("is_first_last", False)]
+    tier2b = [w for w in tier2_works if not w.get("is_first_last", False)]
+    sections.append("\n## Tier 2: first/last-author or topic-relevant\n")
+    sections.append("\n### First/last-author papers (any topic)\n")
     tier2_full = 0
-    for idx, record in enumerate(tier2):
+    for idx, record in enumerate(tier2a):
         text, text_path = _resolve_works_text(record)
         include_full = bool(text) and idx < int(n_full_papers_cap)
         if include_full:
@@ -179,23 +219,43 @@ def _build_for_scientist(
         elif text and text_path:
             needs_summary.append(text_path)
         sections.append(_format_work_entry(record, text if include_full else "", include_full=include_full))
+    if tier2b:
+        sections.append("\n### Middle-author papers that match the debate topic (abstracts only)\n")
+        for record in tier2b:
+            sections.append(_format_work_entry(record, text="", include_full=False))
+    if tier2_blogs or tier2_videos:
+        sections.append("\n### Other blog posts and recorded talks (author/speaker confirmed)\n")
+        for blog in tier2_blogs:
+            if blog.get("url"):
+                sections.append(f"- {blog.get('title', '')} — {blog['url']}")
+        for video in tier2_videos:
+            sections.append(f"- {video.get('title', '')} — {video.get('url', '')}")
     manifest["tier2"] = {
-        "papers_total": len(tier2),
-        "papers_with_fulltext_kept": tier2_full,
+        "first_last_papers_total": len(tier2a),
+        "first_last_papers_with_fulltext_kept": tier2_full,
+        "middle_author_topic_papers": len(tier2b),
         "sources_flagged_for_summary": len(needs_summary),
-        "sample_titles": [w.get("title", "") for w in tier2[:5]],
+        "blogs": len(tier2_blogs),
+        "videos": len(tier2_videos),
+        "sample_titles": [w.get("title", "") for w in tier2a[:5]],
     }
 
-    # Tier 3 — abstracts only, capped
-    sections.append("\n## Tier 3: other\n")
-    kept_tier3 = tier3[: int(n_abstracts_cap)]
-    for record in kept_tier3:
+    # Tier 3 — random sample of papers that are neither author-led nor topic-matching
+    sample_size = int(n_tier3_sample)
+    if len(tier3_works) <= sample_size:
+        sampled = list(tier3_works)
+    else:
+        rng = random.Random(name)  # deterministic per scientist for reproducibility
+        sampled = rng.sample(tier3_works, sample_size)
+    sections.append(f"\n## Tier 3: random sample ({len(sampled)} of {len(tier3_works)} non-author non-topic papers)\n")
+    for record in sampled:
         sections.append(_format_work_entry(record, text="", include_full=False))
     manifest["tier3"] = {
-        "abstracts_total": len(tier3),
-        "abstracts_kept": len(kept_tier3),
-        "abstracts_dropped": max(0, len(tier3) - len(kept_tier3)),
-        "sample_titles": [w.get("title", "") for w in tier3[:5]],
+        "abstracts_total": len(tier3_works),
+        "abstracts_kept": len(sampled),
+        "abstracts_dropped": max(0, len(tier3_works) - len(sampled)),
+        "sampling_method": "random_seeded_by_scientist_name",
+        "sample_titles": [w.get("title", "") for w in sampled[:5]],
     }
 
     # Custom sources — grouped by tier
@@ -223,7 +283,7 @@ def main(
     ingestion = inputs_data.get("ingestion", {})
     custom_sources_map = ingestion.get("custom_sources", {})
     n_full_papers_cap = ingestion.get("n_full_papers_cap", 25)
-    n_abstracts_cap = ingestion.get("n_abstracts_cap", 500)
+    n_tier3_sample = ingestion.get("n_tier3_sample", DEFAULT_TIER3_SAMPLE)
     global_cap = int(global_briefing_word_cap or ingestion.get("global_briefing_word_cap", 80_000))
 
     manifest_top: dict[str, Any] = {
@@ -231,7 +291,7 @@ def main(
         "topic": inputs_data.get("topic"),
         "applied_caps": {
             "n_full_papers_cap": n_full_papers_cap,
-            "n_abstracts_cap": n_abstracts_cap,
+            "n_tier3_sample": n_tier3_sample,
             "global_briefing_word_cap": global_cap,
         },
         "scientists": {},
@@ -245,7 +305,7 @@ def main(
             name,
             custom_sources_map.get(name, []),
             n_full_papers_cap=n_full_papers_cap,
-            n_abstracts_cap=n_abstracts_cap,
+            n_tier3_sample=n_tier3_sample,
         )
         # Global-cap enforcement on the rendered briefing
         if manifest["briefing_word_count"] > global_cap:

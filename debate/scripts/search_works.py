@@ -77,18 +77,74 @@ def _openalex(author: str, since_year: int, max_results: int = 500) -> list[dict
 
 
 def _is_first_or_last_author(name: str, author_list_str: str) -> bool:
+    """Tier-2 author check: first/co-first or last/co-last by position.
+
+    Co-first / co-last aren't reliably marked in PMC or OpenAlex metadata,
+    so we use a positional heuristic tuned per author-list length:
+      - n=1: position 0
+      - n=2: positions 0, 1 (both first-or-last)
+      - n=3: positions 0, 2 (skip the middle author)
+      - n=4: positions 0, 1, 2, 3 (in a 4-author paper, all positions are
+        first-or-last-adjacent — first/co-first or co-last/last)
+      - n>=5: positions 0, 1, n-2, n-1 (first 2 + last 2 = co-first / co-last)
+    """
     names = [a.strip().lower() for a in author_list_str.split(",") if a.strip()]
-    if not names:
+    n = len(names)
+    if n == 0:
         return False
     target = name.lower().split()[-1]
-    return target in names[0] or target in names[-1]
+    if n == 1:
+        check = {0}
+    elif n == 2:
+        check = {0, 1}
+    elif n == 3:
+        check = {0, 2}
+    elif n == 4:
+        check = {0, 1, 2, 3}
+    else:
+        check = {0, 1, n - 2, n - 1}
+    return any(target in names[i] for i in check)
+
+
+def _scientist_in_authors(name: str, author_list_str: str) -> bool:
+    """Pre-filter for OpenAlex false positives.
+
+    Drops papers where the scientist's surname doesn't appear in the author list
+    at all (a name-only OpenAlex search can return papers by other people).
+    """
+    target = name.lower().split()[-1]
+    return any(target in a.lower() for a in author_list_str.split(",") if a.strip())
 
 
 def _assign_tier(record: dict[str, Any], name: str, primary_terms: list[str]) -> int:
+    """Unified tier model.
+
+    - Tier 1 = (first/last author) AND (topic-matching)  — strongest signal
+    - Tier 2 = (first/last author) XOR (topic-matching)  — one signal
+    - Tier 3 = neither                                    — random-sampled downstream
+
+    "First/last author" preference order:
+      1. OpenAlex `author_position` ('first' or 'last') OR `is_corresponding` — when
+         present (only on records sourced from OpenAlex), use the structured signal.
+      2. Positional heuristic on the comma-joined author string (EuropePMC fallback).
+    """
     haystack = " ".join([record.get("title", ""), record.get("abstract", "")]).lower()
-    if any(term.lower() in haystack for term in primary_terms):
+    has_topic = bool(primary_terms) and any(term.lower() in haystack for term in primary_terms)
+
+    # Prefer structured OpenAlex fields when available
+    oa_pos = record.get("openalex_author_position")
+    if oa_pos in ("first", "last") or record.get("openalex_is_corresponding"):
+        is_first_last = True
+    elif oa_pos == "middle":
+        is_first_last = False
+    else:
+        is_first_last = _is_first_or_last_author(name, record.get("authors", ""))
+
+    record["is_first_last"] = is_first_last
+    record["topic_match"] = has_topic
+    if is_first_last and has_topic:
         return 1
-    if _is_first_or_last_author(name, record.get("authors", "")):
+    if is_first_last or has_topic:
         return 2
     return 3
 
@@ -120,7 +176,17 @@ def _from_openalex(hit: dict[str, Any], name: str, primary_terms: list[str]) -> 
             for pos in where:
                 positions[pos] = word
         abstract = " ".join(positions[i] for i in sorted(positions))
-    authors_list = ", ".join(a.get("author", {}).get("display_name", "") for a in hit.get("authorships", []))
+    authorships = hit.get("authorships", []) or []
+    authors_list = ", ".join(a.get("author", {}).get("display_name", "") for a in authorships)
+    # OpenAlex provides structured per-author fields we can use instead of the
+    # positional heuristic — preferred over `_is_first_or_last_author(name, ...)`.
+    target_surname = name.lower().split()[-1]
+    scientist_authorships = [
+        a for a in authorships if target_surname in (a.get("author", {}).get("display_name", "") or "").lower()
+    ]
+    is_first_oa = any(a.get("author_position") == "first" for a in scientist_authorships)
+    is_last_oa = any(a.get("author_position") == "last" for a in scientist_authorships)
+    is_corresponding_oa = any(a.get("is_corresponding") for a in scientist_authorships)
     rec = {
         "id": f"openalex:{hit.get('id', '').rsplit('/', 1)[-1]}",
         "doi": (hit.get("doi", "") or "").replace("https://doi.org/", ""),
@@ -133,6 +199,8 @@ def _from_openalex(hit: dict[str, Any], name: str, primary_terms: list[str]) -> 
         "source": "openalex",
         "pub_type": hit.get("type", ""),
         "url": hit.get("id", ""),
+        "openalex_author_position": ("first" if is_first_oa else "last" if is_last_oa else "middle"),
+        "openalex_is_corresponding": bool(is_corresponding_oa),
     }
     rec["tier"] = _assign_tier(rec, name, primary_terms)
     return rec
@@ -175,6 +243,13 @@ def main(
         *(_from_openalex(hit, author, primary_terms) for hit in oa_hits),
     ]
     records = _dedupe(records)
+    # Author-presence filter: PMC AUTH:"..." search guarantees author in list,
+    # but OpenAlex's broader name search can return false positives (other people
+    # with similar names). Drop records where the surname doesn't appear in any
+    # author position.
+    pre_filter = len(records)
+    records = [r for r in records if _scientist_in_authors(author, r.get("authors", ""))]
+    dropped_falsepos = pre_filter - len(records)
     if tier != "all":
         wanted = {int(t) for t in str(tier).split(",")}
         records = [r for r in records if r["tier"] in wanted]
@@ -186,7 +261,7 @@ def main(
     if "{author}" in str(out_path):
         out_path = Path(str(out_path).format(author=author_slug(author)))
     atomic_write_json(out_path, records)
-    print(f"{out_path} ({len(records)} works)")
+    print(f"{out_path} ({len(records)} works; dropped {dropped_falsepos} false-positive name matches)")
     return out_path
 
 

@@ -216,20 +216,30 @@ def main(
                     summary["biorxiv"].append(res)
 
     if blogs:
-        for post in load_json(Path(blogs)):
+        blogs_payload = load_json(Path(blogs))
+        # search_blogs.py now wraps posts in {scientist, url_source, index_urls, posts: [...]}
+        post_list = blogs_payload.get("posts", []) if isinstance(blogs_payload, dict) else blogs_payload
+        for post in post_list:
             url = post.get("url")
             if not url or post.get("_warning") or post.get("_error"):
                 continue
             res = _fetch_web(url)
             if res:
-                summary["blogs"].append(res)
+                summary["blogs"].append({**res, "tier": post.get("tier", 2)})
 
     if youtube:
         payload = load_json(Path(youtube))
         for video in payload.get("results", []) if isinstance(payload, dict) else []:
+            # Gate on user confirmation — Moderator marks user_confirmed=true after
+            # presenting candidates via AskUserQuestion. Unconfirmed videos are kept
+            # in the search results (so the briefing can link to them) but their
+            # transcripts are NOT downloaded here.
+            if not video.get("user_confirmed", False):
+                summary["youtube"].append({"video_id": video.get("video_id"), "skipped_reason": "not_user_confirmed"})
+                continue
             res = _fetch_youtube_transcript(video["video_id"])
             if res:
-                summary["youtube"].append(res)
+                summary["youtube"].append({**res, "tier": video.get("tier", 2)})
 
     if inputs:
         inputs_data = load_json(Path(inputs))

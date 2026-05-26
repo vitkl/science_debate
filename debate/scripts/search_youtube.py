@@ -1,16 +1,28 @@
 #!/usr/bin/env python3
-"""Find YouTube videos likely featuring a named scientist on a given topic.
+"""Find YouTube videos *by or featuring as speaker* a named scientist.
 
-Two backends with automatic fallback:
-  - **YouTube Data API v3** (preferred when ``YOUTUBE_API_KEY`` is set): faster,
-    more reliable, uses 100 quota units per search.
-  - **yt-dlp** (zero-config fallback): scrapes YouTube search pages, no API key
-    needed. Slightly slower (~1-2s per search) and occasionally fragile when
-    YouTube changes their pages, but works out of the box.
+Search strategy:
+  - **Multi-query**: run several searches per scientist covering the typical
+    appearance formats (lecture, talk, keynote, seminar, interview, podcast,
+    conversation, plus one topic-boosted query). Dedupe by video_id.
+  - **Speaker filter**: keep only videos where the scientist is plausibly
+    speaking. Heuristic: (a) channel name contains scientist surname or full
+    name (own channel / lab channel), OR (b) title OR description contains
+    scientist's name AND title OR description contains a speaking-context word.
+    Drops third-party talks ABOUT the scientist that don't feature them.
+  - **Tier assignment** (mirrors the abstract-search tier model):
+    - Tier 1: speaker-confirmed AND topic-matching (title or description hits
+      a primary keyword)
+    - Tier 2: speaker-confirmed but no topic match
 
-Both backends emit the same JSON schema so downstream consumers don't care
-which one ran. The script prints to stderr which backend was used so the
-Moderator (and the user) see it in conversation.
+Two backends:
+  - **YouTube Data API v3** (preferred when ``YOUTUBE_API_KEY`` is set):
+    faster, more reliable, 100 quota units per search → ~700 units per
+    scientist for the 7 multi-queries.
+  - **yt-dlp** (zero-config fallback): scrapes YouTube. ~10-15 s per scientist
+    for the 7 queries. yt-dlp's extract_flat returns shorter descriptions, so
+    description-based filtering on the yt-dlp path will miss content the API
+    path would catch.
 """
 
 from __future__ import annotations
@@ -25,19 +37,128 @@ from _common import atomic_write_json, http_get, load_json, slug
 
 YOUTUBE_SEARCH = "https://www.googleapis.com/youtube/v3/search"
 
+SPEAKER_VERBS = (
+    "talks",
+    "talk",
+    "lecture",
+    "lectures",
+    "interview",
+    "interviews",
+    "interviewed",
+    "speaks",
+    "presents",
+    "presented",
+    "keynote",
+    "seminar",
+)
 
-def _channel_matches_scientist(channel: str, scientist: str) -> bool:
+QUERY_TEMPLATES = (
+    '"{scientist}" lecture',
+    '"{scientist}" talk',
+    '"{scientist}" keynote',
+    '"{scientist}" seminar',
+    '"{scientist}" interview',
+    '"{scientist}" podcast',
+    '"{scientist}" conversation',
+)
+
+PER_QUERY_RESULTS = 10  # 7 queries × 10 = up to 70 candidates pre-dedupe
+
+
+def _is_speaker(scientist: str, title: str, channel: str, description: str) -> bool:
+    """Strict speaker filter: does the scientist actually speak in this video?
+
+    Three signals (any one suffices):
+      1. **Channel match** — scientist's own channel or lab channel (surname or full
+         name appears in channel title).
+      2. **Title speaker patterns** — name appears in the title in a pattern that
+         CLAIMS the scientist as the subject/speaker:
+            - Title starts with the name ("Judea Pearl on causality")
+            - Colon-prefix to name (": Judea Pearl") — common for interview series
+              like "Lex Fridman #56: Judea Pearl"
+            - Name adjacent to a speaker verb ("Pearl talks", "interview with Pearl")
+            - Preposition + name ("with Pearl", "by Pearl")
+      3. **Description speaker attribution** — explicit "interview with NAME",
+         "by NAME", "featuring NAME", "guest: NAME", "speaker: NAME", etc.
+
+    Drops false positives like third-party talks that *mention* the scientist
+    in passing (e.g. "Sara Mostafavi on graphs (Pearl framework reference)").
+    """
+    if not scientist:
+        return False
     surname = scientist.lower().split()[-1]
-    return surname in channel.lower() or all(part.lower() in channel.lower() for part in scientist.split())
+    full = scientist.lower()
+    title_l = (title or "").lower()
+    chan_l = (channel or "").lower()
+    desc_l = (description or "").lower()
+
+    # 1. Channel match
+    if surname in chan_l or full in chan_l:
+        return True
+
+    # 2. Title speaker patterns
+    if full in title_l or surname in title_l:
+        for n in (full, surname):
+            # Name at the very start of the title
+            if title_l.startswith(n):
+                return True
+            # Colon-prefix to name (e.g., "Lex Fridman #56: Judea Pearl")
+            if f": {n}" in title_l:
+                return True
+            # Name adjacent to speaker verb (both orders)
+            for v in SPEAKER_VERBS:
+                if f"{n} {v}" in title_l or f"{v} {n}" in title_l or f"{v} with {n}" in title_l:
+                    return True
+            # Preposition + name
+            if f"with {n}" in title_l or f"by {n}" in title_l:
+                return True
+
+    # 3. Description speaker attribution
+    if full in desc_l or surname in desc_l:
+        for n in (full, surname):
+            for pat in (
+                f"interview with {n}",
+                f"podcast with {n}",
+                f"conversation with {n}",
+                f"in conversation with {n}",
+                f"with {n},",
+                f"with {n}.",
+                f"by {n}",
+                f"featuring {n}",
+                f"guest: {n}",
+                f"speaker: {n}",
+                f"speakers: {n}",
+                f"presenter: {n}",
+            ):
+                if pat in desc_l:
+                    return True
+
+    return False
 
 
-def _query_for(scientist: str, keywords_data: dict) -> str:
-    primary = " OR ".join(f'"{t}"' for t in keywords_data.get("primary_terms", [])) or keywords_data.get("topic", "")
-    return f'"{scientist}" {primary}'.strip()
+def _assign_yt_tier(title: str, description: str, primary_terms: list[str]) -> int:
+    """Tier 1 if topic-matching, tier 2 if speaker-only (caller already confirmed speaker)."""
+    if not primary_terms:
+        return 2
+    haystack = f"{title or ''} {description or ''}".lower()
+    if any(term.lower() in haystack for term in primary_terms):
+        return 1
+    return 2
+
+
+def _queries_for(scientist: str) -> list[str]:
+    return [tpl.format(scientist=scientist) for tpl in QUERY_TEMPLATES]
+
+
+def _topic_boost_query(scientist: str, keywords_data: dict) -> str | None:
+    primary = keywords_data.get("primary_terms", [])
+    if not primary:
+        return None
+    topic = " ".join(f'"{t}"' for t in primary[:2])
+    return f'"{scientist}" {topic}'.strip()
 
 
 def _search_via_api(scientist: str, query: str, api_key: str, max_results: int) -> list[dict] | dict:
-    """Return list of result dicts, or a dict ``{"failure_reason": ...}`` on error."""
     try:
         response = http_get(
             YOUTUBE_SEARCH,
@@ -61,6 +182,7 @@ def _search_via_api(scientist: str, query: str, api_key: str, max_results: int) 
         video_id = item.get("id", {}).get("videoId", "")
         if not video_id:
             continue
+        description = snippet.get("description", "") or ""
         results.append(
             {
                 "video_id": video_id,
@@ -68,19 +190,18 @@ def _search_via_api(scientist: str, query: str, api_key: str, max_results: int) 
                 "title": snippet.get("title", ""),
                 "channel": channel,
                 "published_at": snippet.get("publishedAt", ""),
-                "description_excerpt": (snippet.get("description", "") or "")[:400],
-                "scientist_channel_match": _channel_matches_scientist(channel, scientist),
+                "description_excerpt": description[:1500],
+                "description_full": description,
             }
         )
     return results
 
 
 def _search_via_ytdlp(scientist: str, query: str, max_results: int) -> list[dict] | dict:
-    """No-API-key fallback via yt-dlp. Same return contract as ``_search_via_api``."""
     try:
         from yt_dlp import YoutubeDL  # type: ignore
     except ImportError as exc:
-        return {"failure_reason": f'yt-dlp not installed: {exc}. Run pip install -e ".[dev,test]" to install.'}
+        return {"failure_reason": f"yt-dlp not installed: {exc}. Run pip install -e . to install."}
 
     n = min(max(int(max_results), 1), 50)
     opts = {
@@ -105,6 +226,7 @@ def _search_via_ytdlp(scientist: str, query: str, max_results: int) -> list[dict
         if not video_id:
             continue
         channel = entry.get("channel") or entry.get("uploader", "")
+        description = entry.get("description") or ""
         results.append(
             {
                 "video_id": video_id,
@@ -112,11 +234,36 @@ def _search_via_ytdlp(scientist: str, query: str, max_results: int) -> list[dict
                 "title": entry.get("title", ""),
                 "channel": channel,
                 "published_at": entry.get("upload_date", "") or "",
-                "description_excerpt": (entry.get("description") or "")[:400],
-                "scientist_channel_match": _channel_matches_scientist(channel, scientist),
+                "description_excerpt": description[:1500],
+                "description_full": description,
             }
         )
     return results
+
+
+def _run_searches(
+    scientist: str,
+    queries: list[str],
+    *,
+    api_key: str | None,
+    max_results: int,
+) -> tuple[list[dict], list[dict]]:
+    """Run all queries, dedupe by video_id, return (results, failures_log)."""
+    seen: dict[str, dict] = {}
+    failures: list[dict] = []
+    for q in queries:
+        if api_key:
+            outcome = _search_via_api(scientist, q, api_key, max_results)
+        else:
+            outcome = _search_via_ytdlp(scientist, q, max_results)
+        if isinstance(outcome, dict):  # failure dict
+            failures.append({"query": q, **outcome})
+            continue
+        for hit in outcome:
+            vid = hit["video_id"]
+            if vid not in seen:
+                seen[vid] = hit
+    return list(seen.values()), failures
 
 
 def main(
@@ -124,45 +271,82 @@ def main(
     out: str,
     *,
     keywords: str,
-    max_results: int = 20,
+    max_results: int = PER_QUERY_RESULTS,
     api_key_env: str = "YOUTUBE_API_KEY",
 ) -> Path:
-    """Search YouTube for ``scientist`` + the debate's primary keywords.
-
-    Picks backend automatically based on ``YOUTUBE_API_KEY``; prints which one
-    is in use so the Moderator can surface it to the user.
-    """
+    """Multi-query YouTube search filtered for scientist-as-speaker, tier-assigned."""
     out_path = Path(out)
     if "{scientist}" in str(out_path):
         out_path = Path(str(out_path).format(scientist=slug(scientist)))
     keywords_data = load_json(Path(keywords))
-    query = _query_for(scientist, keywords_data)
+
+    queries = _queries_for(scientist)
+    topic_q = _topic_boost_query(scientist, keywords_data)
+    if topic_q:
+        queries.append(topic_q)
 
     api_key = os.environ.get(api_key_env, "").strip()
     if api_key:
-        print(f"[search_youtube] using YouTube Data API v3 (key from ${api_key_env})", file=sys.stderr)
-        outcome = _search_via_api(scientist, query, api_key, max_results)
         backend = "api"
-    else:
         print(
-            f"[search_youtube] no ${api_key_env} set — falling back to yt-dlp (slower, may be fragile). "
-            f"For higher reliability, get a free key at https://console.cloud.google.com → enable "
-            f"'YouTube Data API v3' → create credentials → API key, then set it in your "
-            f"~/.claude/settings.json env block. The key is FREE up to 10 000 queries/day.",
+            f"[search_youtube] {scientist}: using YouTube Data API v3 (key from ${api_key_env}); {len(queries)} queries",
             file=sys.stderr,
         )
-        outcome = _search_via_ytdlp(scientist, query, max_results)
+    else:
         backend = "ytdlp"
-
-    if isinstance(outcome, dict):  # failure path
-        atomic_write_json(
-            out_path, {"scientist": scientist, "query": query, "backend": backend, "results": [], **outcome}
+        print(
+            f"[search_youtube] {scientist}: no ${api_key_env} set — falling back to yt-dlp; {len(queries)} queries. "
+            f"For higher reliability and richer descriptions, add a free API key to ~/.claude/settings.json env block.",
+            file=sys.stderr,
         )
-        print(f"{out_path} (failure: {outcome.get('failure_reason')})")
-        return out_path
 
-    atomic_write_json(out_path, {"scientist": scientist, "query": query, "backend": backend, "results": outcome})
-    print(f"{out_path} ({len(outcome)} videos via {backend})")
+    candidates, failures = _run_searches(scientist, queries, api_key=(api_key or None), max_results=max_results)
+    primary_terms = list(keywords_data.get("primary_terms", []))
+
+    kept: list[dict] = []
+    rejected: list[dict] = []
+    for hit in candidates:
+        if not _is_speaker(scientist, hit.get("title", ""), hit.get("channel", ""), hit.get("description_full", "")):
+            rejected.append(
+                {
+                    "video_id": hit["video_id"],
+                    "title": hit.get("title", ""),
+                    "channel": hit.get("channel", ""),
+                    "reason": "not_speaker",
+                }
+            )
+            continue
+        tier = _assign_yt_tier(hit.get("title", ""), hit.get("description_full", ""), primary_terms)
+        kept.append(
+            {
+                "video_id": hit["video_id"],
+                "url": hit["url"],
+                "title": hit["title"],
+                "channel": hit["channel"],
+                "published_at": hit["published_at"],
+                "description_excerpt": hit.get("description_excerpt", ""),
+                "tier": tier,
+                "scientist_channel_match": (slug(scientist).split("-")[-1] in (hit.get("channel", "").lower()))
+                or (scientist.lower() in (hit.get("channel", "").lower())),
+                # Filled by the Moderator after AskUserQuestion confirmation. Until set
+                # true, fetch_fulltext.py will skip transcript download for this video.
+                "user_confirmed": False,
+            }
+        )
+
+    payload = {
+        "scientist": scientist,
+        "queries": queries,
+        "backend": backend,
+        "results": kept,
+        "rejected_count": len(rejected),
+        "rejected_sample": rejected[:5],
+        "failures": failures,
+    }
+    atomic_write_json(out_path, payload)
+    tier1 = sum(1 for r in kept if r["tier"] == 1)
+    tier2 = sum(1 for r in kept if r["tier"] == 2)
+    print(f"{out_path} ({len(kept)} kept [{tier1} tier1, {tier2} tier2], {len(rejected)} rejected, backend={backend})")
     return out_path
 
 
