@@ -136,6 +136,8 @@ def ensure_dirs() -> None:
         "fulltext",
         "web",
         "transcripts",
+        "books",
+        "books_text",
         "manual",
         "manual/uploads",
         "manual/notes",

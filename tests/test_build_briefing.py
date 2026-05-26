@@ -409,6 +409,89 @@ def test_main_emits_needs_user_decision_when_briefing_over_global_cap(tmp_path: 
     assert payload["global_cap"] == 100
 
 
+def _seed_books(papers_cache: Path, slug: str, books: list[dict]) -> None:
+    (papers_cache / "books").mkdir(parents=True, exist_ok=True)
+    (papers_cache / "books" / f"{slug}.json").write_text(json.dumps({"books": books}), encoding="utf-8")
+
+
+def test_build_for_scientist_renders_books_section(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    _seed_works(cache, "judea-pearl", [])
+    _seed_blogs(cache, "judea-pearl", [])
+    _seed_books(
+        cache,
+        "judea-pearl",
+        [
+            {
+                "google_books_id": "vol-why",
+                "title": "The Book of Why",
+                "year": "2018",
+                "description": "The new science of cause and effect.",
+                "snippet": "Causal models...",
+                "preview_link": "https://books.google.com/why",
+                "tier": 1,
+            },
+            {
+                "google_books_id": "vol-other",
+                "title": "Other Book",
+                "year": "2010",
+                "description": "Memoir.",
+                "preview_link": "",
+                "tier": 2,
+            },
+        ],
+    )
+    briefing, manifest, _ = bb._build_for_scientist(
+        "Judea Pearl",
+        custom_sources=[],
+        n_full_papers_cap=25,
+        n_tier3_sample=15,
+    )
+    assert "## Books" in briefing
+    assert "### Tier 1: author + topic-relevant" in briefing
+    assert "The Book of Why" in briefing
+    assert "### Tier 2: author-only" in briefing
+    assert "Other Book" in briefing
+    assert manifest["books"]["tier1_total"] == 1
+    assert manifest["books"]["tier2_total"] == 1
+
+
+def test_build_for_scientist_books_with_full_text(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    _seed_works(cache, "judea-pearl", [])
+    _seed_blogs(cache, "judea-pearl", [])
+    # Seed a books_text file so _resolve_book_text returns text
+    books_text_dir = cache / "books_text"
+    books_text_dir.mkdir(parents=True)
+    (books_text_dir / "vol-why.txt").write_text("Chapter 1: causality is everywhere.")
+    (books_text_dir / "vol-why.meta.json").write_text(json.dumps({"text_source": "internet_archive_djvu"}))
+    _seed_books(
+        cache,
+        "judea-pearl",
+        [
+            {
+                "google_books_id": "vol-why",
+                "title": "The Book of Why",
+                "year": "2018",
+                "description": "The new science of cause and effect.",
+                "preview_link": "https://books.google.com/why",
+                "tier": 1,
+            }
+        ],
+    )
+    briefing, manifest, _ = bb._build_for_scientist(
+        "Judea Pearl",
+        custom_sources=[],
+        n_full_papers_cap=25,
+        n_tier3_sample=15,
+    )
+    assert "Chapter 1: causality is everywhere" in briefing
+    assert "Source: internet_archive_djvu" in briefing
+    assert manifest["books"]["with_text"] == 1
+
+
 def test_main_applies_n_tier1_max_from_inputs(tmp_path: Path, monkeypatch):
     cache = tmp_path / "cache"
     monkeypatch.setattr(bb, "PAPERS_CACHE", cache)

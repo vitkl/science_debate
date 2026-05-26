@@ -82,6 +82,38 @@ def _transcripts_for(scientist: str) -> list[dict[str, Any]]:
     return payload.get("results", [])
 
 
+def _books_for(scientist: str) -> list[dict[str, Any]]:
+    path = PAPERS_CACHE / "books" / f"{author_slug(scientist)}.json"
+    if not path.exists():
+        return []
+    payload = load_json(path)
+    if isinstance(payload, dict):
+        return payload.get("books", [])
+    return payload
+
+
+def _resolve_book_text(book: dict[str, Any]) -> tuple[str, str]:
+    """Locate the on-disk text + meta source-tag for one book record.
+
+    Returns (text, text_source).
+    """
+    book_id = (book.get("google_books_id") or book.get("openalex_id") or "").replace("/", "_")
+    if not book_id:
+        return "", ""
+    text_path = PAPERS_CACHE / "books_text" / f"{book_id}.txt"
+    meta_path = PAPERS_CACHE / "books_text" / f"{book_id}.meta.json"
+    if not text_path.exists():
+        return "", ""
+    text = text_path.read_text(encoding="utf-8")
+    text_source = ""
+    if meta_path.exists():
+        try:
+            text_source = load_json(meta_path).get("text_source", "") or ""
+        except Exception:  # noqa: BLE001
+            text_source = ""
+    return text, text_source
+
+
 def _resolve_works_text(record: dict[str, Any]) -> tuple[str, str]:
     """Locate the on-disk full-text file for a work record. Returns ``(text, source)``."""
     pmcid = record.get("pmcid", "")
@@ -186,17 +218,27 @@ def _build_for_scientist(
     effective_tier2a_cap = int(n_tier2a_full_max) if n_tier2a_full_max is not None else int(n_full_papers_cap)
     blogs = _blogs_for(name)
     transcripts = _transcripts_for(name)
+    books = _books_for(name)
     if dropped_ids:
         blogs = [b for b in blogs if b.get("id") not in dropped_ids and b.get("url") not in dropped_ids]
         transcripts = [
             v for v in transcripts if v.get("video_id") not in dropped_ids and v.get("url") not in dropped_ids
         ]
+        books = [b for b in books if b.get("id") not in dropped_ids]
     tier1_blogs, tier2_blogs = _split_media_by_tier(blogs)
     tier1_videos, tier2_videos = _split_media_by_tier(transcripts)
+    tier1_books, tier2_books = _split_media_by_tier(books)
     needs_summary: list[str] = []
 
     sections: list[str] = [f"# Briefing — {name}\n"]
-    manifest: dict[str, Any] = {"name": name, "tier1": {}, "tier2": {}, "tier3": {}, "custom": {}}
+    manifest: dict[str, Any] = {
+        "name": name,
+        "tier1": {},
+        "tier2": {},
+        "tier3": {},
+        "books": {},
+        "custom": {},
+    }
 
     # Tier 1 — topic-direct (papers + topic-matching blogs/videos)
     sections.append("## Tier 1: topic-direct\n")
@@ -276,6 +318,56 @@ def _build_for_scientist(
         "sampling_method": "random_seeded_by_scientist_name",
         "sample_titles": [w.get("title", "") for w in sampled[:5]],
     }
+
+    # Books — Tier 1 (author + topic) and Tier 2 (author-only).
+    # Tier-1 books: render full text/preview where available (no word cap per user policy);
+    # Tier-2 books: title + description only.
+    if tier1_books or tier2_books:
+        sections.append("\n## Books\n")
+        books_with_text = 0
+        books_metadata_only = 0
+        if tier1_books:
+            sections.append("\n### Tier 1: author + topic-relevant\n")
+            for book in tier1_books:
+                text, text_source = _resolve_book_text(book)
+                title = book.get("title", "Untitled")
+                year = book.get("year", "")
+                description = book.get("description", "")
+                snippet = book.get("snippet", "")
+                link = book.get("preview_link") or book.get("info_link") or ""
+                citation = f"- **{title}** ({year})"
+                if description:
+                    citation += f" — {description}"
+                if text:
+                    citation += f"\n\n_Source: {text_source}; {len(text.split())} words_\n\n{text}\n"
+                    books_with_text += 1
+                else:
+                    if snippet:
+                        citation += f"\n\n  > {snippet}"
+                    books_metadata_only += 1
+                if link:
+                    citation += f"\n\n  Link: {link}"
+                sections.append(citation)
+        if tier2_books:
+            sections.append("\n### Tier 2: author-only (no topic match)\n")
+            for book in tier2_books:
+                title = book.get("title", "Untitled")
+                year = book.get("year", "")
+                description = book.get("description", "")
+                link = book.get("preview_link") or book.get("info_link") or ""
+                line = f"- **{title}** ({year})"
+                if description:
+                    line += f" — {description.splitlines()[0][:200] if description else ''}"
+                if link:
+                    line += f" ({link})"
+                sections.append(line)
+                books_metadata_only += 1
+        manifest["books"] = {
+            "tier1_total": len(tier1_books),
+            "tier2_total": len(tier2_books),
+            "with_text": books_with_text,
+            "metadata_only": books_metadata_only,
+        }
 
     # Custom sources — grouped by tier
     if custom_sources:

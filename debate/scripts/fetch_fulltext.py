@@ -103,6 +103,145 @@ def _fetch_web(url: str) -> dict[str, Any] | None:
     return {"path": str(text_path), "url": url, "source": "web", "cached": False}
 
 
+OPEN_LIBRARY_BOOKS = "https://openlibrary.org/api/books"
+INTERNET_ARCHIVE_TEXT = "https://archive.org/download"
+
+
+def _open_library_lookup(isbn: str) -> dict[str, Any] | None:
+    """Return Open Library bibkey payload for an ISBN, or None on miss."""
+    if not isbn:
+        return None
+    try:
+        response = http_get(
+            OPEN_LIBRARY_BOOKS,
+            params={"bibkeys": f"ISBN:{isbn}", "format": "json", "jscmd": "data"},
+        )
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return None
+    return payload.get(f"ISBN:{isbn}")
+
+
+def _ia_djvu_text(ol_payload: dict[str, Any]) -> tuple[str, str] | None:
+    """Try to extract Internet Archive ``_djvu.txt`` plaintext from an Open Library payload.
+
+    Returns (text, ia_id) or None.
+    """
+    if not ol_payload:
+        return None
+    ebooks = ol_payload.get("ebooks") or []
+    for entry in ebooks:
+        # Prefer the structured 'formats.text' if present
+        formats = entry.get("formats") or {}
+        text_url = formats.get("text")
+        if text_url:
+            try:
+                response = http_get(text_url)
+                return response.text, entry.get("identifier") or ""
+            except Exception:  # noqa: BLE001
+                continue
+        # Otherwise try to derive a _djvu.txt URL from the IA identifier
+        ia_id = entry.get("identifier") or ""
+        if ia_id:
+            url = f"{INTERNET_ARCHIVE_TEXT}/{ia_id}/{ia_id}_djvu.txt"
+            try:
+                response = http_get(url)
+                if response.text and "DOCTYPE html" not in response.text[:200]:
+                    return response.text, ia_id
+            except Exception:  # noqa: BLE001
+                continue
+    return None
+
+
+def _fetch_book(book: dict[str, Any]) -> dict[str, Any] | None:
+    """Resolve full text for one book record. Priority chain:
+
+    1. Open Library (by ISBN) → Internet Archive ``_djvu.txt`` (plaintext OCR).
+    2. trafilatura on Google Books preview link (best-effort; may be empty for SPA pages).
+    3. Description + snippet from Google Books metadata (final fallback).
+
+    Always writes ``.meta.json`` alongside the text for the briefing renderer.
+    """
+    import trafilatura  # type: ignore
+
+    book_id = (book.get("google_books_id") or book.get("openalex_id") or "").replace("/", "_")
+    if not book_id:
+        book_id = content_hash(book.get("title", "") + book.get("year", ""))
+    out_dir = PAPERS_CACHE / "books_text"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    text_path = out_dir / f"{book_id}.txt"
+    meta_path = out_dir / f"{book_id}.meta.json"
+
+    if text_path.exists() and meta_path.exists():
+        existing_meta = load_json(meta_path)
+        return {
+            "path": str(text_path),
+            "book_id": book_id,
+            "text_source": existing_meta.get("text_source"),
+            "source": "book",
+            "cached": True,
+        }
+
+    # 1) Open Library + IA
+    isbn = book.get("isbn", "") or ""
+    text = ""
+    text_source = ""
+    if isbn:
+        ol_payload = _open_library_lookup(isbn)
+        ia_result = _ia_djvu_text(ol_payload) if ol_payload else None
+        if ia_result:
+            text, ia_id = ia_result
+            text_source = "internet_archive_djvu"
+
+    # 2) trafilatura on Google Books preview
+    preview = book.get("preview_link", "") or ""
+    if not text and preview:
+        try:
+            html = trafilatura.fetch_url(preview)
+            extracted = trafilatura.extract(html, include_comments=False, include_tables=False) if html else None
+        except Exception:  # noqa: BLE001
+            extracted = None
+        if extracted and len(extracted.split()) >= 500:
+            text = extracted
+            text_source = "google_books_preview"
+
+    # 3) Metadata fallback (description + snippet)
+    if not text:
+        text_parts = [s for s in (book.get("description", ""), book.get("snippet", "")) if s]
+        text = "\n\n".join(text_parts)
+        text_source = "google_books_metadata"
+
+    if not text:
+        meta = {
+            "title": book.get("title", ""),
+            "authors": book.get("authors", ""),
+            "isbn": isbn,
+            "preview_link": preview,
+            "text_source": "missing",
+            "word_count": 0,
+        }
+        atomic_write_json(meta_path, meta)
+        return {"book_id": book_id, "warning": "no text source available", "source": "book"}
+
+    atomic_write_text(text_path, text)
+    meta = {
+        "title": book.get("title", ""),
+        "authors": book.get("authors", ""),
+        "isbn": isbn,
+        "preview_link": preview,
+        "text_source": text_source,
+        "word_count": len(text.split()),
+    }
+    atomic_write_json(meta_path, meta)
+    return {
+        "path": str(text_path),
+        "book_id": book_id,
+        "text_source": text_source,
+        "source": "book",
+        "cached": False,
+    }
+
+
 def _fetch_youtube_transcript(video_id: str) -> dict[str, Any] | None:
     from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
 
@@ -196,12 +335,20 @@ def main(
     works: str | None = None,
     blogs: str | None = None,
     youtube: str | None = None,
+    books: str | None = None,
     inputs: str | None = None,
     out_dir: str | None = None,
 ) -> dict[str, Any]:
     """Fetch all sources surfaced by upstream scripts. Returns a per-source summary."""
     ensure_dirs()
-    summary: dict[str, list[dict[str, Any]]] = {"pmc": [], "biorxiv": [], "blogs": [], "youtube": [], "custom": []}
+    summary: dict[str, list[dict[str, Any]]] = {
+        "pmc": [],
+        "biorxiv": [],
+        "blogs": [],
+        "youtube": [],
+        "books": [],
+        "custom": [],
+    }
 
     if works:
         for record in load_json(Path(works)):
@@ -240,6 +387,14 @@ def main(
             res = _fetch_youtube_transcript(video["video_id"])
             if res:
                 summary["youtube"].append({**res, "tier": video.get("tier", 2)})
+
+    if books:
+        books_payload = load_json(Path(books))
+        book_list = books_payload.get("books", []) if isinstance(books_payload, dict) else []
+        for book in book_list:
+            res = _fetch_book(book)
+            if res:
+                summary["books"].append({**res, "tier": book.get("tier", 2), "title": book.get("title")})
 
     if inputs:
         inputs_data = load_json(Path(inputs))
