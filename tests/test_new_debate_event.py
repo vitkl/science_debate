@@ -48,6 +48,21 @@ def test_main_creates_event_folder_with_expected_structure(tmp_path: Path, monke
     assert inputs["scientists"]["B"]["name"] == "Alfonso Martinez Arias"
     assert inputs["scientists"]["C"]["name"] == "Marc Kirschner"
     assert inputs["debate"]["total_minutes"] == 80
+    # New tier-cap knobs
+    assert inputs["ingestion"]["n_tier1_max"] is None  # sacred by default
+    assert inputs["ingestion"]["n_tier2a_full_max"] == 25
+    assert inputs["ingestion"]["n_tier3_sample"] == 15
     assert inputs["ingestion"]["n_full_papers_cap"] == 25
-    assert inputs["ingestion"]["n_abstracts_cap"] == 500
+    # Phase A toggles default to None (Moderator asks at runtime)
+    assert inputs["ingestion"]["include_youtube"] is None
+    assert inputs["ingestion"]["include_books"] is None
+    # B4 "drop" lever
+    assert inputs["ingestion"]["dropped_source_ids"] == {
+        "Eric Davidson": [],
+        "Alfonso Martinez Arias": [],
+        "Marc Kirschner": [],
+    }
+    # Old field name is gone (no back-compat)
+    assert "n_abstracts_cap" not in inputs["ingestion"]
+    assert "pre_fetch_urls" not in inputs["ingestion"]
     assert set(inputs["models"]) == {"A", "B", "C", "J"}

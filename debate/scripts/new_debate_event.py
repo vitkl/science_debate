@@ -62,12 +62,16 @@ def main(
             "allow_websearch_during_debate": False,
         },
         "ingestion": {
+            "n_tier1_max": None,
+            "n_tier2a_full_max": 25,
+            "n_tier3_sample": 15,
             "n_full_papers_cap": 25,
-            "n_abstracts_cap": 500,
             "global_briefing_word_cap": 80_000,
+            "include_youtube": None,
+            "include_books": None,
             "per_scientist_instruction": {scientist_a: "", scientist_b: "", scientist_c: ""},
-            "pre_fetch_urls": {scientist_a: [], scientist_b: [], scientist_c: []},
             "custom_sources": {scientist_a: [], scientist_b: [], scientist_c: []},
+            "dropped_source_ids": {scientist_a: [], scientist_b: [], scientist_c: []},
         },
         "models": {"A": "opus", "B": "opus", "C": "opus", "J": "opus"},
     }

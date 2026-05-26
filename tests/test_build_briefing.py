@@ -243,3 +243,204 @@ def test_main_writes_manifest_and_briefing_files(tmp_path: Path, monkeypatch):
     assert (out_dir / "manifest.json").exists()
     for letter in ("A", "B", "C"):
         assert (out_dir / f"briefing_{letter}.md").exists()
+
+
+def _tier1_records(n: int) -> list[dict]:
+    return [
+        {
+            "id": f"europepmc:t1_{i}",
+            "title": f"GRN paper {i}",
+            "year": str(2024 - i),
+            "authors": "Davidson E",
+            "doi": f"10.1/t1_{i}",
+            "abstract": "topic abc",
+            "tier": 1,
+            "pmcid": "",
+            "pmid": "",
+            "is_first_last": True,
+            "topic_match": True,
+        }
+        for i in range(n)
+    ]
+
+
+def test_build_for_scientist_n_tier1_max_caps_tier1(tmp_path: Path, monkeypatch):
+    """When n_tier1_max is set, only the newest N tier-1 papers are kept."""
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    _seed_works(cache, "eric-davidson", _tier1_records(5))
+    _seed_blogs(cache, "eric-davidson", [])
+    briefing, manifest, _ = bb._build_for_scientist(
+        "Eric Davidson",
+        custom_sources=[],
+        n_full_papers_cap=25,
+        n_tier3_sample=15,
+        n_tier1_max=2,
+    )
+    assert manifest["tier1"]["papers_total"] == 2
+    # Newest two (years 2024, 2023) should be present; oldest (2020) should not
+    assert "GRN paper 0" in briefing  # year 2024
+    assert "GRN paper 1" in briefing  # year 2023
+    assert "GRN paper 4" not in briefing  # year 2020 — dropped
+
+
+def test_build_for_scientist_n_tier1_max_none_keeps_all_tier1(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    _seed_works(cache, "eric-davidson", _tier1_records(5))
+    _seed_blogs(cache, "eric-davidson", [])
+    _, manifest, _ = bb._build_for_scientist(
+        "Eric Davidson",
+        custom_sources=[],
+        n_full_papers_cap=25,
+        n_tier3_sample=15,
+        n_tier1_max=None,  # sacred
+    )
+    assert manifest["tier1"]["papers_total"] == 5
+
+
+def test_build_for_scientist_n_tier2a_full_max_overrides_n_full_papers_cap(tmp_path: Path, monkeypatch):
+    """The new n_tier2a_full_max knob takes precedence over n_full_papers_cap."""
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    pmc_dir = cache / "fulltext" / "pmc"
+    pmc_dir.mkdir(parents=True)
+    records = []
+    for i in range(5):
+        pmcid = f"PMC{i}"
+        (pmc_dir / f"{pmcid}.txt").write_text("Full text " + str(i))
+        records.append(
+            {
+                "id": f"europepmc:{i}",
+                "title": f"T{i}",
+                "year": str(2024 - i),
+                "authors": "Davidson E",
+                "doi": "",
+                "pmcid": pmcid,
+                "pmid": "",
+                "abstract": "abs",
+                "tier": 2,
+                "is_first_last": True,
+                "topic_match": False,
+            }
+        )
+    _seed_works(cache, "eric-davidson", records)
+    _seed_blogs(cache, "eric-davidson", [])
+    _, manifest, _ = bb._build_for_scientist(
+        "Eric Davidson",
+        custom_sources=[],
+        n_full_papers_cap=10,  # default-ish; ignored
+        n_tier3_sample=15,
+        n_tier2a_full_max=2,  # overrides
+    )
+    assert manifest["tier2"]["first_last_papers_with_fulltext_kept"] == 2
+
+
+def test_build_for_scientist_respects_dropped_source_ids(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    records = _tier1_records(3)
+    _seed_works(cache, "eric-davidson", records)
+    _seed_blogs(cache, "eric-davidson", [])
+    _, manifest, _ = bb._build_for_scientist(
+        "Eric Davidson",
+        custom_sources=[],
+        n_full_papers_cap=25,
+        n_tier3_sample=15,
+        dropped_source_ids=["europepmc:t1_0", "europepmc:t1_1"],
+    )
+    assert manifest["tier1"]["papers_total"] == 1
+
+
+def test_main_emits_needs_user_decision_when_briefing_over_global_cap(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    out_dir = tmp_path / "event"
+    inputs = tmp_path / "inputs.json"
+    # Seed lots of long-abstract tier-1 records so the briefing exceeds the tiny cap
+    records = [
+        {
+            "id": f"europepmc:{i}",
+            "title": f"P{i}",
+            "year": "2020",
+            "authors": "Davidson E",
+            "doi": "",
+            "pmcid": "",
+            "pmid": "",
+            "abstract": "lorem ipsum " * 50,  # ~100 words per record
+            "tier": 1,
+            "is_first_last": True,
+            "topic_match": True,
+        }
+        for i in range(20)
+    ]
+    _seed_works(cache, "eric-davidson", records)
+    _seed_blogs(cache, "eric-davidson", [])
+    _seed_works(cache, "alfonso-martinez", [])
+    _seed_blogs(cache, "alfonso-martinez", [])
+    _seed_works(cache, "marc-kirschner", [])
+    _seed_blogs(cache, "marc-kirschner", [])
+    inputs.write_text(
+        json.dumps(
+            {
+                "event_slug": "slug",
+                "topic": "x",
+                "scientists": {
+                    "A": {"name": "Eric Davidson"},
+                    "B": {"name": "Alfonso Martinez"},
+                    "C": {"name": "Marc Kirschner"},
+                },
+                "ingestion": {
+                    "n_full_papers_cap": 25,
+                    "n_tier3_sample": 15,
+                    "global_briefing_word_cap": 100,  # tiny — forces overflow
+                    "custom_sources": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    bb.main(inputs=str(inputs), out=str(out_dir))
+    decision_path = out_dir / "needs_user_decision.json"
+    assert decision_path.exists()
+    payload = json.loads(decision_path.read_text())
+    over = [s["scientist"] for s in payload["over_budget_scientists"]]
+    assert "Eric Davidson" in over
+    assert payload["global_cap"] == 100
+
+
+def test_main_applies_n_tier1_max_from_inputs(tmp_path: Path, monkeypatch):
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    out_dir = tmp_path / "event"
+    inputs = tmp_path / "inputs.json"
+    _seed_works(cache, "eric-davidson", _tier1_records(5))
+    _seed_blogs(cache, "eric-davidson", [])
+    _seed_works(cache, "alfonso-martinez", [])
+    _seed_blogs(cache, "alfonso-martinez", [])
+    _seed_works(cache, "marc-kirschner", [])
+    _seed_blogs(cache, "marc-kirschner", [])
+    inputs.write_text(
+        json.dumps(
+            {
+                "event_slug": "slug",
+                "topic": "x",
+                "scientists": {
+                    "A": {"name": "Eric Davidson"},
+                    "B": {"name": "Alfonso Martinez"},
+                    "C": {"name": "Marc Kirschner"},
+                },
+                "ingestion": {
+                    "n_full_papers_cap": 25,
+                    "n_tier3_sample": 15,
+                    "n_tier1_max": 2,
+                    "custom_sources": {},
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    bb.main(inputs=str(inputs), out=str(out_dir))
+    manifest = json.loads((out_dir / "manifest.json").read_text())
+    assert manifest["applied_caps"]["n_tier1_max"] == 2
+    assert manifest["scientists"]["A"]["tier1"]["papers_total"] == 2

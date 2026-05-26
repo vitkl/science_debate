@@ -3,19 +3,24 @@
 
 Per-tier composition rules:
   - Tier 1 (topic-direct): full text where available, abstracts otherwise.
-    **Never dropped, never summarised.**
-  - Tier 2 (first-/last-author): all abstracts; full text up to
-    ``n_full_papers_cap``; over-cap full texts are flagged for summarisation
-    to ``~500 words`` each via an external Task subagent (the Moderator
-    spawns one summary task per source listed in ``needs_summary.json``;
-    re-run this script to merge the resulting ``<path>.summary.md`` files).
-  - Tier 3 (other): all abstracts up to ``n_abstracts_cap``.
+    Sacred by default (``n_tier1_max = None`` keeps all); the Phase B4
+    interactive 'reduce' option may cap it with a warning.
+  - Tier 2a (first-/last-author, any topic): full text up to
+    ``n_tier2a_full_max`` (default 25). Over-cap full texts are flagged
+    for summarisation in ``needs_summary.json``.
+  - Tier 2b (middle-author topic-relevant): abstracts only.
+  - Tier 3 (neither author nor topic): random seeded sample of
+    ``n_tier3_sample`` papers (default 15).
   - Custom sources: rendered in their own section.
 
-Global cap (default 80 000 words / Opus-safe): drop oldest Tier-3 abstracts,
-then drop oldest Tier-2 full text, then summarise Tier-2 full text, then
-summarise Tier-3 abstracts in thematic batches, then surface the over-budget
-**Tier-1** list to the user via ``needs_user_decision.json``.
+When the rendered briefing exceeds ``global_briefing_word_cap``, the scientist
+is added to ``needs_user_decision.json`` — the Moderator surfaces an interactive
+summarise / reduce / drop choice (see Phase B4 of the run-debate skill).
+The drop/summarise cascade is therefore handled at the SKILL level, not silently
+inside this script.
+
+``inputs.json::ingestion.dropped_source_ids[scientist]`` is consulted before
+rendering — listed source IDs are filtered out from any tier.
 """
 
 from __future__ import annotations
@@ -153,6 +158,9 @@ def _build_for_scientist(
     *,
     n_full_papers_cap: int,
     n_tier3_sample: int,
+    n_tier1_max: int | None = None,
+    n_tier2a_full_max: int | None = None,
+    dropped_source_ids: list[str] | None = None,
 ) -> tuple[str, dict[str, Any], list[str]]:
     """Return ``(briefing_markdown, manifest_for_this_scientist, needs_summary_paths)``.
 
@@ -167,11 +175,22 @@ def _build_for_scientist(
         dropped upstream by their respective search scripts.
     """
     works = sorted(_works_for(name), key=lambda r: r.get("year", ""), reverse=True)
+    dropped_ids = set(dropped_source_ids or [])
+    if dropped_ids:
+        works = [w for w in works if w.get("id") not in dropped_ids]
     tier1_works = [w for w in works if w.get("tier") == 1]
     tier2_works = [w for w in works if w.get("tier") == 2]
     tier3_works = [w for w in works if w.get("tier") == 3]
+    if n_tier1_max is not None and len(tier1_works) > int(n_tier1_max):
+        tier1_works = tier1_works[: int(n_tier1_max)]  # newest first (works sorted by year DESC)
+    effective_tier2a_cap = int(n_tier2a_full_max) if n_tier2a_full_max is not None else int(n_full_papers_cap)
     blogs = _blogs_for(name)
     transcripts = _transcripts_for(name)
+    if dropped_ids:
+        blogs = [b for b in blogs if b.get("id") not in dropped_ids and b.get("url") not in dropped_ids]
+        transcripts = [
+            v for v in transcripts if v.get("video_id") not in dropped_ids and v.get("url") not in dropped_ids
+        ]
     tier1_blogs, tier2_blogs = _split_media_by_tier(blogs)
     tier1_videos, tier2_videos = _split_media_by_tier(transcripts)
     needs_summary: list[str] = []
@@ -213,7 +232,7 @@ def _build_for_scientist(
     tier2_full = 0
     for idx, record in enumerate(tier2a):
         text, text_path = _resolve_works_text(record)
-        include_full = bool(text) and idx < int(n_full_papers_cap)
+        include_full = bool(text) and idx < effective_tier2a_cap
         if include_full:
             tier2_full += 1
         elif text and text_path:
@@ -282,8 +301,11 @@ def main(
     inputs_data = load_json(Path(inputs))
     ingestion = inputs_data.get("ingestion", {})
     custom_sources_map = ingestion.get("custom_sources", {})
+    dropped_map = ingestion.get("dropped_source_ids", {}) or {}
     n_full_papers_cap = ingestion.get("n_full_papers_cap", 25)
     n_tier3_sample = ingestion.get("n_tier3_sample", DEFAULT_TIER3_SAMPLE)
+    n_tier1_max = ingestion.get("n_tier1_max")  # None = unlimited (sacred)
+    n_tier2a_full_max = ingestion.get("n_tier2a_full_max")  # None = use n_full_papers_cap
     global_cap = int(global_briefing_word_cap or ingestion.get("global_briefing_word_cap", 80_000))
 
     manifest_top: dict[str, Any] = {
@@ -292,6 +314,8 @@ def main(
         "applied_caps": {
             "n_full_papers_cap": n_full_papers_cap,
             "n_tier3_sample": n_tier3_sample,
+            "n_tier1_max": n_tier1_max,
+            "n_tier2a_full_max": n_tier2a_full_max,
             "global_briefing_word_cap": global_cap,
         },
         "scientists": {},
@@ -306,6 +330,9 @@ def main(
             custom_sources_map.get(name, []),
             n_full_papers_cap=n_full_papers_cap,
             n_tier3_sample=n_tier3_sample,
+            n_tier1_max=n_tier1_max,
+            n_tier2a_full_max=n_tier2a_full_max,
+            dropped_source_ids=dropped_map.get(name, []),
         )
         # Global-cap enforcement on the rendered briefing
         if manifest["briefing_word_count"] > global_cap:
