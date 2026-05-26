@@ -44,12 +44,13 @@ Read `.claude/settings.json`. If `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS != "1
 Use small batches; the user may have ADHD — keep each batch ≤ 3 questions. Persist answers to `debate_events/<slug>/inputs.json`.
 
 - **Batch 1 — required**: scientist A name; scientist B name; scientist C name (Reviewer); one-sentence debate topic.
-- **Batch 2 — debate shape**: `total_minutes` (default 80); `give_collaborative_tone_to_presenters?` (default *no*); `journalist_word_budget` (default 500–600); `allow_websearch_during_debate?` (default *no*); `include_youtube?` (default *yes* — works out of the box via yt-dlp).
+- **Batch 2 — debate shape + media toggles**: `total_minutes` (default 80); `give_collaborative_tone_to_presenters?` (default *no*); `journalist_word_budget` (default 500–600); `allow_websearch_during_debate?` (default *no*); `include_youtube?` (default *yes* — works out of the box via yt-dlp); `include_books?` (default *yes* — uses OpenAlex + Google Books + Open Library/IA, all free, no key).
   - <section purpose="YouTube works without setup via yt-dlp (zero-config fallback). If the user has YOUTUBE_API_KEY in their env (e.g. set in ~/.claude/settings.json), the script auto-prefers the API backend. Either way, no user action required in Phase A — the dispatch is automatic in search_youtube.py.">YouTube search works out of the box via yt-dlp; no setup needed. If `YOUTUBE_API_KEY` is set in the env (e.g. in `~/.claude/settings.json`), the script automatically prefers the YouTube Data API v3 backend (faster, more reliable, 10 000 free queries/day) — otherwise it transparently falls back to yt-dlp page-scraping. Either way, no Phase A action required: `search_youtube.py` picks the backend itself and prints which one it used to stderr so the user sees it.</section>
-- **Batch 3 — ingestion**: per-scientist free-text instruction (default = the tier description below); `n_full_papers_cap` (default 25); `n_abstracts_cap` (default 500); `pre_fetch_urls` (optional list — harness asks per-domain permission); `custom_sources` (optional per-scientist list — see schema below).
+  - **Persist Batch 2 answers via Edit to `debate_events/<slug>/inputs.json::ingestion.include_youtube` and `…include_books`** before starting Phase B — the answers control whether `search_youtube.py` and `search_books.py` run.
+- **Batch 3 — ingestion**: per-scientist free-text instruction (default = the tier description below); `n_full_papers_cap` (default 25, the maximum Tier-2a full-text papers); `n_tier3_sample` (default 15, the random-sample size for papers that are neither first/last-author nor topic-matching); `custom_sources` (optional per-scientist list — see schema below; includes `type: url` for one-off URLs).
 - **Batch 4 — models**: model per role for PresenterA, PresenterB, Reviewer-scientist, Journalist (default Opus). Tell the user the Moderator (you) runs Sonnet by default; teammates do **not** inherit lead model — you specify each one explicitly at spawn.
 
-**Default ingestion instruction** (the tier description): *"Read this scientist's work in three tiers and stop when you have enough. **Tier 1** — work directly about the debate topic (papers, blog posts, book chapters, recorded-talk transcripts, social-media posts when available, opinion/commentary pieces from PMC). **Tier 2** — papers where they are first or last author (abstracts always; full text up to `n_full_papers_cap`). **Tier 3** — all other papers (abstracts only up to `n_abstracts_cap`)."*
+**Default ingestion instruction** (the tier description): *"Read this scientist's work in three tiers and stop when you have enough. **Tier 1** — work directly about the debate topic AND by the scientist (papers, blog posts, book chapters, recorded-talk transcripts where they are the speaker). **Tier 2** — first/last-author papers (any topic; full text up to `n_full_papers_cap` / `n_tier2a_full_max`) OR middle-author papers that match the debate topic (abstract only). **Tier 3** — neither first/last-author nor topic-matching: a random seeded sample of `n_tier3_sample` abstracts (default 15)."*
 
 **`custom_sources` schema** (handles uploaded files on claude.ai/code web, local file paths in VSCode/desktop, full directories of e.g. non-OA PDFs, and inline notes):
 ```jsonc
@@ -87,33 +88,119 @@ Before calling `generate_search_keywords.py`, **you** (the Moderator) think out 
 
 </section>
 
-<section purpose="Parallel per-source metadata searches: papers via PMC + OpenAlex, blogs via the registry, YouTube only if explicitly enabled and the API key is set (degrades gracefully otherwise).">
+<section purpose="Parallel per-source metadata searches: papers via PMC + OpenAlex, blogs via WebSearch + AskUserQuestion + registry, books via OpenAlex + Google Books (if include_books), YouTube only if include_youtube. All searches mirror the tier model: Tier 1 = author AND topic.">
 
 ### B2 — search
 
-For each scientist run, in parallel. **Pass `{author}` / `{scientist}` literally in the `--out` path** — the scripts auto-substitute the canonical slug (lowercase, dash-separated). Do NOT pre-compute a slug yourself; the script's substitution is the source of truth that `build_briefing.py` later reads from.
+For each scientist run **in parallel where possible**. **Pass `{author}` / `{scientist}` literally in the `--out` path** — the scripts auto-substitute the canonical slug (lowercase, dash-separated). Do NOT pre-compute a slug yourself; the script's substitution is the source of truth that `build_briefing.py` later reads from.
 
+**B2a — papers** (always runs):
 - `search_works.py --author "<NAME>" --keywords debate_events/<slug>/keywords.json --tier all --out 'papers_cache/works/{author}.json'`
-- `search_blogs.py --scientist "<NAME>" --registry debate/blog_registry.yaml --keywords debate_events/<slug>/keywords.json --out 'papers_cache/blogs/{scientist}.json'`
-- *If* `include_youtube == true`: `search_youtube.py --scientist "<NAME>" --keywords debate_events/<slug>/keywords.json --out 'papers_cache/youtube_search/{scientist}.json'` (auto-picks backend: YouTube Data API v3 when `YOUTUBE_API_KEY` is set, yt-dlp otherwise; prints the chosen backend to stderr — surface it in the conversation so the user knows which path ran)
+
+**B2b — blogs** (Moderator-driven discovery + AskUserQuestion confirmation):
+1. For each scientist, WebSearch: `"<scientist>" blog OR substack OR wordpress OR personal-site`.
+2. Also consult `debate/blog_registry.yaml` for already-known blogs by this scientist.
+3. Present the union of candidate URLs via `AskUserQuestion` (multiSelect): *"Which blog URLs to crawl for `<scientist>`? (Select multiple, or skip.)"*.
+4. For each confirmed URL, invoke:
+   ```
+   search_blogs.py --scientist "<NAME>" --urls "u1,u2,..." \
+     --keywords debate_events/<slug>/keywords.json \
+     --out 'papers_cache/blogs/{scientist}.json'
+   ```
+5. If the user skipped all candidates, write an empty result file so build_briefing can proceed:
+   ```
+   search_blogs.py --scientist "<NAME>" --urls "" --keywords ... --out '...'
+   ```
+
+**B2c — books** (only if `inputs.json::ingestion.include_books == true`):
+```
+search_books.py --scientist "<NAME>" \
+  --keywords debate_events/<slug>/keywords.json \
+  --works 'papers_cache/works/{author}.json' \
+  --out 'papers_cache/books/{scientist}.json'
+```
+Merges OpenAlex book records (already pulled in B2a) with Google Books metadata; emits per-book records tagged with tier and access metadata.
+
+**B2d — YouTube** (only if `inputs.json::ingestion.include_youtube == true`):
+```
+search_youtube.py --scientist "<NAME>" \
+  --keywords debate_events/<slug>/keywords.json \
+  --out 'papers_cache/youtube_search/{scientist}.json'
+```
+Auto-picks backend (API v3 if `YOUTUBE_API_KEY` set, yt-dlp otherwise) and prints the chosen backend to stderr — surface it in the conversation. The strict speaker filter (channel/title/description) drops third-party talks that merely mention the scientist's name.
 
 </section>
 
-<section purpose="Cache-aware full-text download dispatcher: PMC XML, bioRxiv PDF, generic web pages, YouTube transcripts, plus user-supplied custom sources. Each new outbound domain is gated by per-domain user approval before fetching.">
+<section purpose="Per-scientist Moderator-driven video confirmation: present strict-filter results, user multi-selects which transcripts to fetch, flip user_confirmed=true on the JSON, THEN invoke fetch_fulltext for transcript download. Without this step every transcript is skipped (fetch_fulltext gates on user_confirmed).">
+
+### B3a — video confirmation (only if `include_youtube == true`)
+
+After `search_youtube.py` writes `papers_cache/youtube_search/<slug>.json`:
+1. Read the file and group results by scientist.
+2. For each scientist, present candidate videos to the user via `AskUserQuestion` (multiSelect; batch in groups of 4 if more than 4 candidates):
+   *"Which YouTube videos for `<scientist>` to fetch transcripts for?
+    Each entry: `<title> | <channel> | tier <T> | <url>`.
+    Picking 'none' skips all transcripts for this scientist."*
+3. For each user-confirmed video, mutate `papers_cache/youtube_search/<slug>.json` via Edit: set `"user_confirmed": true` on the matching records.
+4. Only then proceed to B3 fetch (the gate at `fetch_fulltext.py` skips records where `user_confirmed=False`).
+
+</section>
+
+<section purpose="Cache-aware full-text download dispatcher: PMC XML, bioRxiv PDF, web pages, YouTube transcripts (user-confirmed only), books (Open Library/IA, fall back to Google Books snippets), plus custom_sources. Custom sources of type=url are read from inputs.json directly.">
 
 ### B3 — fetch full text
 
-`fetch_fulltext.py --works papers_cache/works/<author>.json --blogs papers_cache/blogs/<scientist>.json --youtube papers_cache/youtube_search/<scientist>.json --custom-sources debate_events/<slug>/inputs.json --pre-fetch-urls debate_events/<slug>/inputs.json`
+```
+fetch_fulltext.py \
+  --works 'papers_cache/works/{author}.json' \
+  --blogs 'papers_cache/blogs/{scientist}.json' \
+  --youtube 'papers_cache/youtube_search/{scientist}.json' \
+  --books 'papers_cache/books/{scientist}.json' \
+  --inputs debate_events/<slug>/inputs.json \
+  --out-dir papers_cache/
+```
 
-For each domain in `pre_fetch_urls` and each new domain in custom URLs, **ask the user via `AskUserQuestion`** before fetching. Already-cached items skip silently.
+The `--inputs` flag is how `custom_sources` is read (the script consumes `inputs.json::ingestion.custom_sources`); there is no separate `--custom-sources` flag. URLs to pre-fetch outside `custom_sources` are not supported in this version — add them as `custom_sources: type: url` entries instead.
+
+Already-cached items skip silently. For custom-source `type: url` entries pointing at new domains, `AskUserQuestion` once per new domain before fetching.
 
 </section>
 
-<section purpose="Per-scientist briefing assembly under user caps. Handles oversize sources via LLM summarisation (Tier-1 sacred, Tier-2 summarisable to ~500 words, Tier-3 batch-summarisable). If even after that the briefing exceeds the global cap, surfaces the over-budget Tier-1 list to the user for triage.">
+<section purpose="Per-scientist briefing assembly under user caps. Two-round interactive budget gate: Round 1 surfaces tier-2a overflow (n_full_papers_cap exceeded); Round 2 surfaces global-cap overflow. Each round offers summarise / reduce / drop with explicit cost and coverage trade-offs.">
 
-### B4 — briefings
+### B4 — briefings (interactive budget gate)
 
-`build_briefing.py --inputs debate_events/<slug>/inputs.json --out debate_events/<slug>/` produces `briefing_<scientist>.md` × 3 + `manifest.json`. If the script writes `needs_summary.json` (over-budget sources), spawn one `Task` subagent per source with prompt *"Summarise this paper/post to ~500 words preserving the author's argument, claims, and characteristic vocabulary. Source path: <path>. Write result to <path>.summary.md."*, then re-run `build_briefing.py` to merge. If `needs_user_decision.json` appears (briefing still over global cap after Tier-2 summary + Tier-3 batch summary), surface the over-budget Tier-1 list to the user via `AskUserQuestion`.
+Run `build_briefing.py --inputs debate_events/<slug>/inputs.json --out debate_events/<slug>/` once. It produces `briefing_<scientist>.md` × 3 + `manifest.json`. Then inspect the side-effect output files:
+
+**Round 1 — Tier-2a overflow** (only if `needs_summary.json` appears):
+
+Semantics: `needs_summary.json` lists tier-2a (first/last-author) full texts beyond `n_full_papers_cap` / `n_tier2a_full_max`. AskUserQuestion:
+*"Tier-2a (first/last-author) for `<scientist>` has N sources beyond `n_full_papers_cap`. Pick:
+  A) Summarise the N over-cap sources via /summarise-for-debate (paid LLM calls)
+  B) Drop the over-cap sources (keep their abstracts only — cheapest)
+  C) Raise `n_full_papers_cap` (currently 25)"*
+
+- If A: invoke `/summarise-for-debate` once per path in `needs_summary.json` (`--model haiku` default; user can pick Sonnet/Opus, see Round 2 model picker). Re-run `build_briefing.py`.
+- If B: append the over-cap source IDs (from `needs_summary.json`) to `inputs.json::ingestion.dropped_source_ids[scientist]` via Edit. Re-run `build_briefing.py`.
+- If C: Edit `inputs.json::ingestion.n_full_papers_cap`. Re-run.
+
+**Round 2 — Global cap overflow** (only if `needs_user_decision.json` appears after Round 1):
+
+Semantics: `needs_user_decision.json` lists scientists whose briefing still exceeds `global_briefing_word_cap` (default 80 000 words). AskUserQuestion:
+*"Briefing for `<scientist>` is N words over the global cap (default 80k). Pick:
+  A) Summarise over-budget sources via /summarise-for-debate
+  B) Reduce tier sizes (cheaper, less coverage — per-tier knobs prompted next)
+  C) Drop specific sources by ID (multi-select from the worst offenders)"*
+
+- If A: AskUserQuestion *"Model for summarisation? Haiku (fast, cheap; recommended for mechanical summaries) / Sonnet (balanced) / Opus (highest quality)"*. For each source in `needs_summary.json` (or top-N by word-count if `needs_user_decision.json` doesn't enumerate sources, pick the longest tier-2 / tier-3 entries from the briefing first), invoke `/summarise-for-debate --model <chosen> --source-path <path> --topic "<topic>" --scientist "<name>" --target-words 500`. Re-run `build_briefing.py`.
+- If B: three AskUserQuestion (one per tier):
+  - *"Tier 1 max papers? (default `null` = unlimited. **Warning: dropping Tier 1 drops topic-direct sources — your scientist agent loses the most-relevant material.**)"*
+  - *"Tier 2a max full-text papers? (default 25)"*
+  - *"Tier 3 random sample size? (default 15)"*
+  - Edit `inputs.json::ingestion.{n_tier1_max, n_tier2a_full_max, n_tier3_sample}`. Re-run `build_briefing.py`.
+- If C: present the top-N over-budget sources (by word count, from the briefing) via AskUserQuestion (multiSelect). Append selected source IDs to `inputs.json::ingestion.dropped_source_ids[scientist]`. Re-run.
+
+**Loop Round 2 up to 3 times.** If briefing still exceeds the cap after 3 rounds, surface the absolute word count and AskUserQuestion *"Your scientist agent's context will be tight (Opus is 200k tokens ≈ 150k words). Proceed anyway?"*. **Tier 1 is never dropped automatically — only via explicit user setting of `n_tier1_max` (option B) or option C.**
 
 </section>
 
@@ -138,11 +225,24 @@ Commit to `debate_events/<slug>/talk_<X>.md`. Stages 1 and 2 in Phase C deliver 
 
 </section>
 
-<section purpose="Hard sync point. Show the user what was prepared (counts, sample titles, intros, talks) and wait for an explicit GO. Cheap insurance against a 60-minute debate launched on bad inputs.">
+<section purpose="Hard sync point. Show the user what was prepared (per-tier counts incl. 2a/2b split and books/transcripts, sample titles, intros, talks) and wait for an explicit GO. Cheap insurance against a 60-minute debate launched on bad inputs.">
 
 ### B6 — review gate
 
-Display per-scientist counts (`Tier 1: X papers (Y full text), N blogs, M transcripts; Tier 2: …; Tier 3: …`), 5 sample titles per tier per scientist, the final intros, the final talks. `AskUserQuestion` *"Confirm to start the debate, or amend?"*. **Wait for an explicit "GO"** — do not start stages without it.
+Read `debate_events/<slug>/manifest.json` for the actual counts (don't fabricate them). For each scientist, display:
+
+```
+<Scientist real name>
+  Tier 1 (topic-direct): X papers (Y with full text), B1 blogs, V1 transcripts, K1 books
+  Tier 2a (first/last-author, any topic): X full-text kept (of Z eligible) / N flagged for summary
+  Tier 2b (middle-author, topic-relevant abstracts): X papers
+  Tier 3 (random sample): X of Z total
+  Books: tier1=K1, tier2=K2 (with-text=W)
+  Custom sources: N
+  Briefing word count: W
+```
+
+Then show 5 sample titles per tier per scientist, the final intros, the final talks. `AskUserQuestion` *"Confirm to start the debate, or amend?"*. **Wait for an explicit "GO"** — do not start stages without it.
 
 </section>
 
