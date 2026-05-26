@@ -1,11 +1,19 @@
-import anndata as ad
-import numpy as np
-import pytest
+"""Shared pytest fixtures + sys.path setup for debate/scripts/* tests.
 
+The scripts under debate/scripts/ are invoked as scripts (not as a package),
+so they use plain `from _common import ...` imports. Tests need the scripts
+directory on sys.path before they can import the modules under test.
+"""
 
-@pytest.fixture
-def adata():
-    adata = ad.AnnData(X=np.array([[1.2, 2.3], [3.4, 4.5], [5.6, 6.7]]).astype(np.float32))
-    adata.layers["scaled"] = np.array([[0.1, 0.2], [0.3, 0.4], [0.5, 0.6]]).astype(np.float32)
+from __future__ import annotations
 
-    return adata
+import sys
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_DIR = REPO_ROOT / "debate" / "scripts"
+
+# Put the scripts dir at the FRONT so `_common` etc. resolve to our package, not
+# to any similarly-named module that might be installed in the env.
+if str(SCRIPTS_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_DIR))

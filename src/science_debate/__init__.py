@@ -1,3 +1,3 @@
-from . import pl, pp, tl
+"""Science Debate — AI-agent scientific debate orchestration. See debate/ for the package contents."""
 
-__all__ = ["pl", "pp", "tl"]
+__version__ = "0.0.1"

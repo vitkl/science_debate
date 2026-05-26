@@ -45,33 +45,32 @@ if [[ $# -eq 0 ]]; then
     exit 2
 fi
 
-# --- Platform check (local-only; Mac for now) ---
-if [[ "$(uname)" != "Darwin" ]]; then
-    echo "ERROR: this launcher currently supports macOS only. Adapt run_conda_bash.sh if extending to other hosts." >&2
-    exit 3
-fi
-
-# --- Ensure conda is available as a shell function ---
+# --- Try to activate conda env; fall back to running the command bare if conda
+#     isn't available (e.g. claude.ai/code web sandbox, CI containers).
 set +u
+CONDA_OK=0
 if [[ -f "$HOME/miniforge3/etc/profile.d/conda.sh" ]]; then
     # shellcheck source=/dev/null
     source "$HOME/miniforge3/etc/profile.d/conda.sh"
+    CONDA_OK=1
 elif command -v conda >/dev/null 2>&1; then
     eval "$(conda shell.bash hook)"
+    CONDA_OK=1
+fi
+
+if (( CONDA_OK == 1 )) && type conda 2>/dev/null | head -1 | grep -q "function"; then
+    if conda env list 2>/dev/null | awk '{print $1}' | grep -qx "$ENV_NAME"; then
+        export PYTHONNOUSERSITE=TRUE
+        conda activate "$ENV_NAME"
+        set -u
+        exec "$@"
+    else
+        echo "WARNING: conda env '$ENV_NAME' not found; running command without env activation. Run pip install -e \".[dev,test]\" first if you need the project deps." >&2
+    fi
 else
-    echo "ERROR: conda not found. Install miniforge3 or set up conda on PATH." >&2
-    exit 4
+    echo "WARNING: conda not found; running command without env activation. Make sure the required Python deps are installed (pip install -e \".[dev,test]\")." >&2
 fi
 set -u
 
-if ! type conda 2>/dev/null | head -1 | grep -q "function"; then
-    echo "ERROR: conda is not available as a shell function; cannot run 'conda activate'." >&2
-    exit 5
-fi
-
-# --- Activate ---
-export PYTHONNOUSERSITE=TRUE
-conda activate "$ENV_NAME"
-
-# --- Exec the bash command verbatim ---
+# --- Fallback: exec the command bare so the same wrapper works everywhere ---
 exec "$@"

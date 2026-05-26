@@ -3,7 +3,7 @@ build-backend = "hatchling.build"
 requires = [ "hatchling" ]
 
 [project]
-name = "science_debate"
+name = "science-debate"
 version = "0.0.1"
 description = "Science Debate"
 readme = "README.md"
@@ -23,9 +23,17 @@ classifiers = [
   "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-  "anndata",
+  "fire",
+  "google-api-python-client",
+  "lxml",
+  "pymupdf",
+  "pyyaml",
+  "requests",
   # for debug logging (referenced from the issue template)
   "session-info2",
+  "trafilatura",
+  "youtube-transcript-api",
+  "yt-dlp",
 ]
 # https://docs.pypi.org/project_metadata/#project-urls
 urls.Documentation = "https://science_debate.readthedocs.io/"

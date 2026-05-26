@@ -1,0 +1,1 @@
+../../debate/agents/journalist.md

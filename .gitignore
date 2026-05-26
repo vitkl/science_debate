@@ -19,3 +19,9 @@ __pycache__/
 # docs
 /docs/generated/
 /docs/_build/
+
+# Per-debate workspaces and shared paper cache (generated)
+/debate_events/
+!/debate_events/.gitkeep
+/papers_cache/
+!/papers_cache/.gitkeep

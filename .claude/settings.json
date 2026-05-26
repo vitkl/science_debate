@@ -1,0 +1,26 @@
+{
+    "env": {
+        "CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS": "1"
+    },
+    "teammateMode": "in-process",
+    "permissions": {
+        "allow": [
+            "Write(debate_events/**)",
+            "Edit(debate_events/**)",
+            "Bash(bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/*)",
+            "Bash(bash scripts/helper_scripts/run_conda_bash.sh -- pip install*)",
+            "Bash(mkdir -p debate_events/*)",
+            "Bash(mkdir -p papers_cache/*)",
+            "Bash(ln -s debate/* .claude/*)",
+            "Read(~/.claude/settings.json)",
+            "Read(~/.claude/settings.local.json)",
+            "Read(~/.claude/CLAUDE.md)",
+            "Read(~/.claude/skills/**)",
+            "Read(~/.claude/agents/**)",
+            "Read(~/.claude/commands/**)",
+            "Read(~/.claude/output-styles/**)",
+            "Read(~/.claude/hooks/**)",
+            "Read(~/.claude/keybindings.json)"
+        ]
+    }
+}

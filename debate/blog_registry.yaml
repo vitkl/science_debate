@@ -1,0 +1,17 @@
+# blog_registry.yaml — known scientific bloggers used by search_blogs.py
+#
+# Each top-level key is a scientist's full name (as written in inputs.json).
+# The value is a list of one or more blog URLs (homepage or index page).
+# search_blogs.py reads this file in registry mode and crawls each listed
+# URL for posts matching the debate's keywords.json.
+#
+# Extend freely. Use search_blogs.py --discover to surface candidates.
+
+Lior Pachter:
+  - https://liorpachter.wordpress.com/
+
+Ewan Birney:
+  - https://ewanbirney.wordpress.com/
+
+Valentine Svensson:
+  - http://www.nxn.se/
