@@ -158,6 +158,7 @@ def test_main_uses_api_when_key_present(tmp_path: Path, monkeypatch):
     with (
         patch.object(syt, "_search_via_api", return_value=fake_result) as mock_api,
         patch.object(syt, "_search_via_ytdlp") as mock_ydl,
+        patch.object(syt, "_resolve_channel_handles", return_value={}),
     ):
         syt.main(scientist="Eric Davidson", out=str(out_path), keywords=str(keywords_path))
     assert mock_api.call_count == 8
@@ -178,6 +179,62 @@ def test_main_records_failures_per_query(tmp_path: Path, monkeypatch):
     assert payload["results"] == []
     assert len(payload["failures"]) == 7  # every query failed; no topic-boost when no primary_terms
     assert payload["failures"][0]["failure_reason"] == "yt-dlp blew up"
+
+
+# ---- PODCAST_CHANNELS + multi_speaker flag ----
+
+
+def test_podcast_channels_constant_includes_known_hosts():
+    handles = {h for _, _, h in syt.PODCAST_CHANNELS}
+    assert "@samharrisorg" in handles
+    assert "@lexfridman" in handles
+    assert "@joerogan" in handles
+
+
+def test_is_multi_speaker_fires_on_podcast_channel_name():
+    assert syt._is_multi_speaker("Lex Fridman Podcast", "Episode #100", {})
+
+
+def test_is_multi_speaker_fires_on_title_hint():
+    assert syt._is_multi_speaker("Random Channel", "An interview with Judea Pearl", {})
+    assert syt._is_multi_speaker("Random Channel", "Conversation with Carroll", {})
+
+
+def test_is_multi_speaker_false_for_solo_lecture():
+    assert not syt._is_multi_speaker("MIT OpenCourseWare", "Lecture 7: Causality", {})
+
+
+def test_main_sets_multi_speaker_flag_on_interview_title(tmp_path: Path, monkeypatch):
+    monkeypatch.delenv("YOUTUBE_API_KEY", raising=False)
+    keywords_path = tmp_path / "k.json"
+    keywords_path.write_text(json.dumps({"topic": "x", "primary_terms": []}), encoding="utf-8")
+    out_path = tmp_path / "out.json"
+    fake = [
+        {
+            "video_id": "v1",
+            "url": "u1",
+            "title": "An interview with Judea Pearl",
+            "channel": "Generic Channel",
+            "published_at": "",
+            "description_excerpt": "",
+            "description_full": "",
+        },
+        {
+            "video_id": "v2",
+            "url": "u2",
+            "title": "Judea Pearl lecture on causality",  # solo lecture — not multi-speaker
+            "channel": "MIT",
+            "published_at": "",
+            "description_excerpt": "",
+            "description_full": "",
+        },
+    ]
+    with patch.object(syt, "_search_via_ytdlp", return_value=fake):
+        syt.main(scientist="Judea Pearl", out=str(out_path), keywords=str(keywords_path))
+    payload = json.loads(out_path.read_text())
+    results = {r["video_id"]: r for r in payload["results"]}
+    assert results["v1"]["multi_speaker"] is True
+    assert results["v2"]["multi_speaker"] is False
 
 
 def test_main_filters_out_non_speaker_videos(tmp_path: Path, monkeypatch):

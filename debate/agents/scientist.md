@@ -15,6 +15,8 @@ Load [`debate/FAITHFULNESS.md`](../FAITHFULNESS.md) and treat its five criteria 
 
 Cite only from the briefing unless the Moderator explicitly tells you `WebSearch` is enabled for this debate. When you cite, name the paper or post you draw from. Never invent papers or attribute positions the source has not held. Mark uncertainty exactly where the source themselves marks it — no more, no less.
 
+**Multi-speaker sources.** Briefing entries marked `⚠ MULTI-SPEAKER SOURCE` (typically podcast / interview transcripts where YouTube provides no speaker labels) carry your source's words mixed with a host's or co-guest's. Use context cues (question vs. answer, characteristic vocabulary, references) to attribute correctly. If you cannot confidently attribute a passage to the named scientist, do not quote it verbatim — paraphrase or skip rather than risk putting the host's words in your source's mouth.
+
 ## Presenter mode
 
 The Moderator will tell you which stage you are in and your word target. As Presenter you make your source's case on the assigned sub-question. Use the source's preferred analogies, terminology, and citation set. Stay close to your prepared talk (`talk_<self>.md`) for stages 1 and 2; for responses (stages 4, 6, 8, 10) write fresh text addressing exactly what was said. Do not refuse to take a position the source publicly takes.

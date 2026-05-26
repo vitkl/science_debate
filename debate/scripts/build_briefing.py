@@ -255,7 +255,10 @@ def _build_for_scientist(
             if blog.get("url"):
                 sections.append(f"- {blog.get('title', '')} — {blog['url']}")
         for video in tier1_videos:
-            sections.append(f"- {video.get('title', '')} — {video.get('url', '')}")
+            marker = (
+                "  > ⚠ MULTI-SPEAKER SOURCE — verify attribution before quoting\n" if video.get("multi_speaker") else ""
+            )
+            sections.append(f"- {video.get('title', '')} — {video.get('url', '')}\n{marker}")
     manifest["tier1"] = {
         "papers_total": len(tier1_works),
         "papers_with_fulltext": tier1_full,
@@ -290,7 +293,10 @@ def _build_for_scientist(
             if blog.get("url"):
                 sections.append(f"- {blog.get('title', '')} — {blog['url']}")
         for video in tier2_videos:
-            sections.append(f"- {video.get('title', '')} — {video.get('url', '')}")
+            marker = (
+                "  > ⚠ MULTI-SPEAKER SOURCE — verify attribution before quoting\n" if video.get("multi_speaker") else ""
+            )
+            sections.append(f"- {video.get('title', '')} — {video.get('url', '')}\n{marker}")
     manifest["tier2"] = {
         "first_last_papers_total": len(tier2a),
         "first_last_papers_with_fulltext_kept": tier2_full,
