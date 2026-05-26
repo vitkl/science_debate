@@ -26,6 +26,7 @@ dependencies = [
   "fire",
   "google-api-python-client",
   "lxml",
+  "markdown",
   "pymupdf",
   "pyyaml",
   "requests",

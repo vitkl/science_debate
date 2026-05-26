@@ -14,14 +14,15 @@ This file is the Journalist agent's writing brief. It distils what good Nature N
 
 Default ≈ **500–600 words** (≈ 2 Google-Docs default-font pages). User-overridable via `journalist_word_budget` at Phase A.
 
-## Three-tier audience handling (single article, not three separate pieces)
+## Three-tier audience handling (three separate articles)
 
-Write the body for the **adjacent-field reader** (someone trained in biology but not in the specific subfield). Then:
+Produce **three articles**, written to three files in the event folder. Each follows the same structure above; the difference is voice / jargon-density / context-building:
 
-- **For the same-field reader** — insert one or two short *"Deeper:"* inline boxes (2–3 sentences each) where the mechanism gets technical. Place them where a same-field reader would otherwise feel under-served; keep them inline so adjacent-field readers can skip them visually without losing the thread.
-- **For the STEM-educated reader** — define jargon on first use (no glossary; just a parenthetical or a half-sentence). Prefer concrete examples over abstractions.
+- **`article_same_field.md`** — for scientists in the same field. Deep, technical, jargon ok. Don't define terms a specialist already knows; instead, surface technical nuance (mechanisms, specific cis-regulatory elements, specific datasets) the debate touched on. ~`journalist_word_budget` words (default 500–600).
+- **`article_broader_field.md`** — for scientists in adjacent fields (e.g. computational biologist reading a developmental-biology debate). Define jargon on first use (parenthetical or half-sentence). More conceptual context; bridge across subfields. Same length.
+- **`article_general_stem.md`** — for STEM-educated readers without field background (e.g. a physicist reading a biology debate, or a software engineer with general scientific interest). No jargon (or one-line glossings for unavoidable terms); more concrete examples; more bridge-building between the specific debate and what a generalist already knows. Same length.
 
-The test: an adjacent-field reader finishes the article and feels informed; a same-field reader feels they got real signal from the "Deeper" boxes; a STEM-educated reader (e.g. a physicist or a software engineer with general bio interest) is never blocked by an undefined term.
+The test: a same-field reader finishes their article and feels they got real specialist signal; an adjacent-field reader feels informed without struggling on terms; a STEM-educated reader is never blocked by an undefined term and leaves understanding why the disagreement matters.
 
 ## Hard rules
 

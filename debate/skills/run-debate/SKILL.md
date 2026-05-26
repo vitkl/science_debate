@@ -280,11 +280,27 @@ After stages **1, 2, 4, 6, 7, 8, 9, 10**, `AskUserQuestion` *"Audience question,
 
 </section>
 
-<section purpose="Journalist writes the Nature-News-and-Views-style summary from the full transcript and JOURNALISM.md. Output is the user-visible artefact.">
+<section purpose="Journalist writes three audience-tiered Nature-News-and-Views-style summaries from the full transcript. Output is the user-visible artefact (three .md files).">
 
-### C3 — journalist
+### C3 — journalist (three articles)
 
-After stage 10, send the Journalist *"Read `debate_events/<slug>/transcript.md` and `debate/JOURNALISM.md`. Write the summary article to `debate_events/<slug>/article.md`, target ≈ {journalist_word_budget} words. Apply Nature News-and-Views structure. Never invent quotes."* Append `Journalist: …` line + the article to `transcript.md`.
+After stage 10, send the Journalist a single instruction that produces all three articles in one go:
+
+```
+Read `debate_events/<slug>/transcript.md` and `debate/JOURNALISM.md`.
+Produce three articles targeting different audiences:
+  1. `article_same_field.md`     — for scientists in the same field
+  2. `article_broader_field.md`  — for scientists in adjacent fields
+  3. `article_general_stem.md`   — for STEM-educated readers without field background
+Word budget per article: {journalist_word_budget}. Apply Nature News-and-Views
+structure (lede / setup / body alternating perspectives / what would change /
+close on most-productive remaining disagreement). Never invent quotes — every
+quoted phrase must appear verbatim in `transcript.md`. Watch for the
+`⚠ MULTI-SPEAKER SOURCE` marker on briefing entries the debate drew on:
+paraphrase rather than quote when you can't confidently attribute.
+After writing all three files, append a `Journalist: wrote 3 articles to ...`
+summary line to `transcript.md` so downstream tooling can find them.
+```
 
 </section>
 
@@ -310,7 +326,21 @@ Per-session token counts are not cleanly exposed via slash commands for Pro / Ma
      "grand_total_context_tokens": N
    }
    ```
-6. Then ask the lead (yourself) to clean up the team per the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams#clean-up-the-team).
+6. Render the three articles to HTML and bundle the event outputs into zips so the user can share / archive:
+
+   ```bash
+   bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_html.py \
+     --inputs "debate_events/<slug>/article_same_field.md,debate_events/<slug>/article_broader_field.md,debate_events/<slug>/article_general_stem.md"
+
+   bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/package_outputs.py \
+     --event-dir "debate_events/<slug>/"
+   ```
+
+   Two zips land in the event folder: `<slug>_highlights.zip` (small, ready to share — articles + transcript + audience log + manifest + usage) and `<slug>_full.zip` (entire event folder for archival).
+
+7. AskUserQuestion: *"Outputs ready in `debate_events/<slug>/`. What would you like? A) preview articles in browser (open the three .html files), B) download the highlights zip (small, ready to share), C) download the full event zip (everything, archival), D) all of the above."* Surface the absolute paths to the user in the conversation so the file explorer / browser open works on local Claude Code; on claude.ai/code (web) the user must download before the sandbox expires.
+
+8. Then ask the lead (yourself) to clean up the team per the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams#clean-up-the-team).
 
 </section>
 

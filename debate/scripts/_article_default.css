@@ -1,0 +1,122 @@
+/* Minimal article stylesheet for journalist output. Serif body, clear hierarchy,
+ * generous line-height. Tuned for ~720px max width so the article reads well
+ * in a browser without any frame. */
+
+:root {
+    color-scheme: light dark;
+    --fg: #1a1a1a;
+    --muted: #555;
+    --accent: #0b5fff;
+    --rule: #ddd;
+    --code-bg: #f5f5f5;
+    --quote-bar: #c5c5c5;
+}
+
+@media (prefers-color-scheme: dark) {
+    :root {
+        --fg: #e6e6e6;
+        --muted: #aaa;
+        --accent: #6aa1ff;
+        --rule: #333;
+        --code-bg: #1f1f1f;
+        --quote-bar: #555;
+    }
+}
+
+body {
+    font-family: Georgia, "Iowan Old Style", "Source Serif Pro", serif;
+    font-size: 17px;
+    line-height: 1.55;
+    color: var(--fg);
+    background: Canvas;
+    margin: 2.5rem auto;
+    max-width: 720px;
+    padding: 0 1.25rem;
+}
+
+article {
+    display: block;
+}
+
+h1,
+h2,
+h3,
+h4 {
+    font-family:
+        -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial,
+        sans-serif;
+    line-height: 1.25;
+    margin-top: 1.6em;
+    margin-bottom: 0.4em;
+}
+
+h1 {
+    font-size: 1.9rem;
+}
+h2 {
+    font-size: 1.4rem;
+}
+h3 {
+    font-size: 1.15rem;
+    color: var(--muted);
+}
+
+p {
+    margin: 0.8em 0;
+}
+
+a {
+    color: var(--accent);
+    text-decoration: none;
+    border-bottom: 1px solid color-mix(in srgb, var(--accent) 35%, transparent);
+}
+
+a:hover {
+    text-decoration: underline;
+}
+
+blockquote {
+    margin: 1em 0;
+    padding: 0.25em 1em;
+    border-left: 3px solid var(--quote-bar);
+    color: var(--muted);
+    font-style: italic;
+}
+
+code,
+pre {
+    font-family: "SF Mono", Menlo, Consolas, monospace;
+    font-size: 0.9em;
+}
+
+pre {
+    background: var(--code-bg);
+    padding: 1em;
+    overflow-x: auto;
+    border-radius: 4px;
+}
+
+code {
+    background: var(--code-bg);
+    padding: 0.1em 0.3em;
+    border-radius: 3px;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid var(--rule);
+    margin: 2em 0;
+}
+
+table {
+    border-collapse: collapse;
+    width: 100%;
+    margin: 1em 0;
+}
+
+th,
+td {
+    border: 1px solid var(--rule);
+    padding: 0.5em 0.75em;
+    text-align: left;
+}
