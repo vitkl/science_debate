@@ -94,6 +94,25 @@ def author_slug(name: str) -> str:
     return slug(name)
 
 
+def scientist_in_authors(name: str, author_list_str: str) -> bool:
+    """Token-boundary surname match in a free-text author list.
+
+    Drops false positives where the surname appears only as a substring of a
+    longer name (e.g., surname "Lee" inside "Banerjee"). Accepts standard
+    punctuation boundaries ("Pearl, J.", "J. Pearl").
+    """
+    if not name or not author_list_str:
+        return False
+    parts = name.lower().split()
+    if not parts:
+        return False
+    surname = parts[-1].strip()
+    if not surname:
+        return False
+    pattern = r"\b" + re.escape(surname) + r"\b"
+    return re.search(pattern, author_list_str.lower()) is not None
+
+
 def url_hash(url: str) -> str:
     """Stable short hash for keying cached web fetches by URL."""
     return hashlib.sha1(url.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]

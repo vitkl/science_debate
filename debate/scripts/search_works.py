@@ -14,11 +14,12 @@ how a scientist publicly speaks.
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import Any
 
 import fire
-from _common import atomic_write_json, author_slug, http_get, load_json
+from _common import atomic_write_json, author_slug, http_get, load_json, scientist_in_authors
 
 EUROPE_PMC = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 OPENALEX_WORKS = "https://api.openalex.org/works"
@@ -35,7 +36,7 @@ def _europepmc(author: str, since_year: int, max_results: int = 500) -> list[dic
             params={
                 "query": query,
                 "format": "json",
-                "resultType": "lite",
+                "resultType": "core",
                 "pageSize": PAGE_SIZE,
                 "cursorMark": cursor,
             },
@@ -106,16 +107,6 @@ def _is_first_or_last_author(name: str, author_list_str: str) -> bool:
     return any(target in names[i] for i in check)
 
 
-def _scientist_in_authors(name: str, author_list_str: str) -> bool:
-    """Pre-filter for OpenAlex false positives.
-
-    Drops papers where the scientist's surname doesn't appear in the author list
-    at all (a name-only OpenAlex search can return papers by other people).
-    """
-    target = name.lower().split()[-1]
-    return any(target in a.lower() for a in author_list_str.split(",") if a.strip())
-
-
 def _assign_tier(record: dict[str, Any], name: str, primary_terms: list[str]) -> int:
     """Unified tier model.
 
@@ -124,16 +115,23 @@ def _assign_tier(record: dict[str, Any], name: str, primary_terms: list[str]) ->
     - Tier 3 = neither                                    — random-sampled downstream
 
     "First/last author" preference order:
-      1. OpenAlex `author_position` ('first' or 'last') OR `is_corresponding` — when
-         present (only on records sourced from OpenAlex), use the structured signal.
-      2. Positional heuristic on the comma-joined author string (EuropePMC fallback).
+      1. EuropePMC structured fields (epmc_author_position / epmc_is_corresponding)
+      2. OpenAlex structured fields (openalex_author_position / openalex_is_corresponding)
+      3. Positional heuristic on the comma-joined author string (fallback)
+
+    A 'middle' verdict from a structured source is definitive; None means
+    "no structured info" and the next preference level is consulted.
     """
     haystack = " ".join([record.get("title", ""), record.get("abstract", "")]).lower()
     has_topic = bool(primary_terms) and any(term.lower() in haystack for term in primary_terms)
 
-    # Prefer structured OpenAlex fields when available
+    epmc_pos = record.get("epmc_author_position")
     oa_pos = record.get("openalex_author_position")
-    if oa_pos in ("first", "last") or record.get("openalex_is_corresponding"):
+    if epmc_pos in ("first", "last") or record.get("epmc_is_corresponding"):
+        is_first_last = True
+    elif epmc_pos == "middle":
+        is_first_last = False
+    elif oa_pos in ("first", "last") or record.get("openalex_is_corresponding"):
         is_first_last = True
     elif oa_pos == "middle":
         is_first_last = False
@@ -149,8 +147,49 @@ def _assign_tier(record: dict[str, Any], name: str, primary_terms: list[str]) ->
     return 3
 
 
+def _epmc_author_position(hit: dict[str, Any], name: str) -> tuple[str | None, bool]:
+    """Extract structured first/last + corresponding flag from EuropePMC `core` payload.
+
+    Returns (position, is_corresponding) where position is "first"/"last"/"middle"
+    or None when the scientist has no matched authorship in the authorList.
+    """
+    author_list = (hit.get("authorList") or {}).get("author") or []
+    if not author_list:
+        return None, False
+    parts = name.lower().split()
+    if not parts:
+        return None, False
+    target = parts[-1].strip()
+    if not target:
+        return None, False
+    matched_idxs: list[int] = []
+    is_corresponding = False
+    for idx, author in enumerate(author_list):
+        last_name = (author.get("lastName") or "").lower()
+        full_name = (author.get("fullName") or "").lower()
+        # Token-boundary match in lastName field or fullName
+        if not last_name and not full_name:
+            continue
+        haystack = f"{last_name} {full_name}"
+        pat = r"\b" + re.escape(target) + r"\b"
+        if re.search(pat, haystack):
+            matched_idxs.append(idx)
+            if author.get("authorIsCorresponding") in ("Y", True, "true"):
+                is_corresponding = True
+    if not matched_idxs:
+        return None, False
+    n = len(author_list)
+    last_pos = n - 1
+    if any(i == 0 for i in matched_idxs):
+        return "first", is_corresponding
+    if any(i == last_pos for i in matched_idxs):
+        return "last", is_corresponding
+    return "middle", is_corresponding
+
+
 def _from_europepmc(hit: dict[str, Any], name: str, primary_terms: list[str]) -> dict[str, Any]:
-    rec = {
+    epmc_pos, epmc_corr = _epmc_author_position(hit, name)
+    rec: dict[str, Any] = {
         "id": f"europepmc:{hit.get('id', '')}",
         "doi": hit.get("doi", ""),
         "pmid": hit.get("pmid", ""),
@@ -163,8 +202,20 @@ def _from_europepmc(hit: dict[str, Any], name: str, primary_terms: list[str]) ->
         "pub_type": hit.get("pubType", ""),
         "url": f"https://europepmc.org/article/{hit.get('source', 'med')}/{hit.get('id', '')}",
     }
+    if epmc_pos is not None:
+        rec["epmc_author_position"] = epmc_pos
+    rec["epmc_is_corresponding"] = epmc_corr
     rec["tier"] = _assign_tier(rec, name, primary_terms)
     return rec
+
+
+def _extract_openalex_isbn(hit: dict[str, Any]) -> str:
+    ids = hit.get("ids") or {}
+    for key in ("isbn13", "isbn10", "isbn"):
+        v = ids.get(key)
+        if v:
+            return str(v)
+    return ""
 
 
 def _from_openalex(hit: dict[str, Any], name: str, primary_terms: list[str]) -> dict[str, Any]:
@@ -178,16 +229,29 @@ def _from_openalex(hit: dict[str, Any], name: str, primary_terms: list[str]) -> 
         abstract = " ".join(positions[i] for i in sorted(positions))
     authorships = hit.get("authorships", []) or []
     authors_list = ", ".join(a.get("author", {}).get("display_name", "") for a in authorships)
-    # OpenAlex provides structured per-author fields we can use instead of the
-    # positional heuristic — preferred over `_is_first_or_last_author(name, ...)`.
-    target_surname = name.lower().split()[-1]
-    scientist_authorships = [
-        a for a in authorships if target_surname in (a.get("author", {}).get("display_name", "") or "").lower()
-    ]
+    # Token-boundary surname match on each authorship display_name.
+    parts = name.lower().split()
+    target_surname = parts[-1].strip() if parts else ""
+    scientist_authorships = []
+    if target_surname:
+        pat = r"\b" + re.escape(target_surname) + r"\b"
+        scientist_authorships = [
+            a for a in authorships if re.search(pat, (a.get("author", {}).get("display_name", "") or "").lower())
+        ]
     is_first_oa = any(a.get("author_position") == "first" for a in scientist_authorships)
     is_last_oa = any(a.get("author_position") == "last" for a in scientist_authorships)
     is_corresponding_oa = any(a.get("is_corresponding") for a in scientist_authorships)
-    rec = {
+    if not scientist_authorships:
+        oa_position: str | None = None
+    elif is_first_oa:
+        oa_position = "first"
+    elif is_last_oa:
+        oa_position = "last"
+    else:
+        oa_position = "middle"
+    work_type = hit.get("type", "") or ""
+    is_book = work_type in {"book", "book-chapter"}
+    rec: dict[str, Any] = {
         "id": f"openalex:{hit.get('id', '').rsplit('/', 1)[-1]}",
         "doi": (hit.get("doi", "") or "").replace("https://doi.org/", ""),
         "pmid": "",
@@ -197,24 +261,61 @@ def _from_openalex(hit: dict[str, Any], name: str, primary_terms: list[str]) -> 
         "authors": authors_list,
         "abstract": abstract,
         "source": "openalex",
-        "pub_type": hit.get("type", ""),
+        "pub_type": work_type,
         "url": hit.get("id", ""),
-        "openalex_author_position": ("first" if is_first_oa else "last" if is_last_oa else "middle"),
+        "is_book": is_book,
+        "isbn": _extract_openalex_isbn(hit),
         "openalex_is_corresponding": bool(is_corresponding_oa),
     }
+    if oa_position is not None:
+        rec["openalex_author_position"] = oa_position
     rec["tier"] = _assign_tier(rec, name, primary_terms)
     return rec
 
 
-def _dedupe(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
+_STRUCTURED_MERGE_FIELDS = (
+    "openalex_author_position",
+    "openalex_is_corresponding",
+    "epmc_author_position",
+    "epmc_is_corresponding",
+    "is_book",
+    "isbn",
+)
+
+
+def _merge_structured(into: dict[str, Any], from_rec: dict[str, Any]) -> None:
+    """Copy useful structured fields from ``from_rec`` onto ``into`` when missing."""
+    for field in _STRUCTURED_MERGE_FIELDS:
+        if field in from_rec and field not in into:
+            into[field] = from_rec[field]
+
+
+def _dedupe(records: list[dict[str, Any]], name: str, primary_terms: list[str]) -> list[dict[str, Any]]:
+    """Dedup by DOI / PMID / id, MERGING structured fields when duplicates collide.
+
+    Preference: EuropePMC wins (better abstract quality). When OpenAlex is dropped,
+    its structured author-position fields are copied onto the kept EPMC record so
+    tier assignment can use them. Tier is recomputed after merge.
+    """
     seen: dict[str, dict[str, Any]] = {}
     for rec in records:
         key = (rec.get("doi") or rec.get("pmid") or rec["id"]).lower()
         if not key:
             continue
         existing = seen.get(key)
-        if existing is None or (existing["source"] == "openalex" and rec["source"] == "europepmc"):
+        if existing is None:
             seen[key] = rec
+            continue
+        # Always merge structured fields between duplicates
+        if existing["source"] == "openalex" and rec["source"] == "europepmc":
+            # EPMC wins; merge OA fields onto rec, then replace
+            _merge_structured(rec, existing)
+            rec["tier"] = _assign_tier(rec, name, primary_terms)
+            seen[key] = rec
+        else:
+            # Keep existing; merge any fields it doesn't have from rec
+            _merge_structured(existing, rec)
+            existing["tier"] = _assign_tier(existing, name, primary_terms)
     return list(seen.values())
 
 
@@ -242,13 +343,13 @@ def main(
         *(_from_europepmc(hit, author, primary_terms) for hit in epmc_hits),
         *(_from_openalex(hit, author, primary_terms) for hit in oa_hits),
     ]
-    records = _dedupe(records)
+    records = _dedupe(records, author, primary_terms)
     # Author-presence filter: PMC AUTH:"..." search guarantees author in list,
     # but OpenAlex's broader name search can return false positives (other people
     # with similar names). Drop records where the surname doesn't appear in any
-    # author position.
+    # author position. Uses token-boundary matching to avoid 'Lee' inside 'Banerjee'.
     pre_filter = len(records)
-    records = [r for r in records if _scientist_in_authors(author, r.get("authors", ""))]
+    records = [r for r in records if scientist_in_authors(author, r.get("authors", ""))]
     dropped_falsepos = pre_filter - len(records)
     if tier != "all":
         wanted = {int(t) for t in str(tier).split(",")}
