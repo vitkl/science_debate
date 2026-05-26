@@ -20,12 +20,18 @@ EUROPE_PMC_ABSTRACT = "https://www.ebi.ac.uk/europepmc/webservices/rest/search"
 
 
 def pmid_to_pmcid(pmid: str) -> str | None:
-    """Resolve a PubMed ID to a PMC ID via NCBI's ID converter; returns ``None`` if not in OA."""
-    response = http_get(
-        ID_CONVERT_URL,
-        params={"ids": pmid, "format": "json", "tool": "science_debate", "email": "vitkl@protonmail.com"},
-    )
-    payload = response.json()
+    """Resolve a PubMed ID to a PMC ID via NCBI's ID converter; returns ``None`` on failure or non-OA."""
+    try:
+        response = http_get(
+            ID_CONVERT_URL,
+            params={"ids": pmid, "format": "json", "tool": "science_debate", "email": "vitkl@protonmail.com"},
+        )
+    except Exception:  # noqa: BLE001 — network blip shouldn't crash the whole fetch run
+        return None
+    try:
+        payload = response.json()
+    except Exception:  # noqa: BLE001
+        return None
     records = payload.get("records", [])
     if not records:
         return None
@@ -68,11 +74,17 @@ def parse_pmc_xml(xml_path: Path) -> dict[str, str]:
 
 def fetch_abstract(pmid: str) -> dict[str, str] | None:
     """Citation-only abstract via Europe PMC REST. Returns ``{title, abstract, year, authors}`` or ``None``."""
-    response = http_get(
-        EUROPE_PMC_ABSTRACT,
-        params={"query": f"EXT_ID:{pmid} AND SRC:MED", "format": "json", "resultType": "lite"},
-    )
-    hits = response.json().get("resultList", {}).get("result", [])
+    try:
+        response = http_get(
+            EUROPE_PMC_ABSTRACT,
+            params={"query": f"EXT_ID:{pmid} AND SRC:MED", "format": "json", "resultType": "lite"},
+        )
+    except Exception:  # noqa: BLE001
+        return None
+    try:
+        hits = response.json().get("resultList", {}).get("result", [])
+    except Exception:  # noqa: BLE001
+        return None
     if not hits:
         return None
     hit = hits[0]

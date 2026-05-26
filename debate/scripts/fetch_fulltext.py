@@ -36,10 +36,14 @@ from _pmc_client import fetch_pmc_xml, parse_pmc_xml, pmid_to_pmcid
 
 
 def _extract_pdf_text(pdf_bytes: bytes) -> str:
-    import pymupdf  # type: ignore
+    """Best-effort PDF text extraction; returns empty string if pymupdf can't parse."""
+    try:
+        import pymupdf  # type: ignore
 
-    with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
-        return "\n".join(page.get_text() for page in doc)
+        with pymupdf.open(stream=pdf_bytes, filetype="pdf") as doc:
+            return "\n".join(page.get_text() for page in doc)
+    except Exception:  # noqa: BLE001 — encrypted / corrupted PDFs raise many subtypes
+        return ""
 
 
 def _fetch_biorxiv(doi: str) -> dict[str, Any] | None:
@@ -72,17 +76,24 @@ def _fetch_biorxiv(doi: str) -> dict[str, Any] | None:
 def _fetch_pmc(record: dict[str, Any]) -> dict[str, Any] | None:
     pmcid = record.get("pmcid") or ""
     if not pmcid and record.get("pmid"):
-        pmcid = pmid_to_pmcid(record["pmid"]) or ""
+        try:
+            pmcid = pmid_to_pmcid(record["pmid"]) or ""
+        except Exception:  # noqa: BLE001 — network blip shouldn't kill the whole fetch run
+            return None
     if not pmcid:
         return None
-    xml_path = fetch_pmc_xml(pmcid)
+    try:
+        xml_path = fetch_pmc_xml(pmcid)
+    except Exception:  # noqa: BLE001
+        return None
     if xml_path is None:
         return None
     parsed = parse_pmc_xml(xml_path)
     text_path = xml_path.with_suffix(".txt")
-    if not text_path.exists():
+    was_cached = text_path.exists()
+    if not was_cached:
         atomic_write_text(text_path, parsed.get("body_text", "") or parsed.get("abstract", ""))
-    return {"path": str(text_path), "pmcid": pmcid, "source": "pmc", "cached": text_path.exists()}
+    return {"path": str(text_path), "pmcid": pmcid, "source": "pmc", "cached": was_cached}
 
 
 def _fetch_web(url: str) -> dict[str, Any] | None:
@@ -93,10 +104,16 @@ def _fetch_web(url: str) -> dict[str, Any] | None:
     text_path = out_dir / f"{url_hash(url)}.txt"
     if text_path.exists():
         return {"path": str(text_path), "url": url, "source": "web", "cached": True}
-    html = trafilatura.fetch_url(url)
+    try:
+        html = trafilatura.fetch_url(url)
+    except Exception as exc:  # noqa: BLE001 — bad URL / network shouldn't kill the fetch run
+        return {"url": url, "source": "web", "warning": f"fetch_url failed: {exc}"}
     if not html:
         return None
-    extracted = trafilatura.extract(html, include_comments=False, include_tables=True)
+    try:
+        extracted = trafilatura.extract(html, include_comments=False, include_tables=True)
+    except Exception as exc:  # noqa: BLE001
+        return {"url": url, "source": "web", "warning": f"extract failed: {exc}"}
     if not extracted:
         return None
     atomic_write_text(text_path, extracted)
@@ -351,7 +368,12 @@ def main(
     }
 
     if works:
-        for record in load_json(Path(works)):
+        # Filter-then-fetch: only pull full text for tier-1 + tier-2a first/last-author records.
+        # Tier-2b middle-author topic-match papers and tier-3 abstracts stay metadata-only;
+        # fetching their full text wastes API quota and disk.
+        all_records = load_json(Path(works))
+        full_text_eligible = [r for r in all_records if r.get("tier") in (1, 2) and r.get("is_first_last")]
+        for record in full_text_eligible:
             res = _fetch_pmc(record)
             if res:
                 summary["pmc"].append(res)

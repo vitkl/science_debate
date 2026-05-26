@@ -335,10 +335,22 @@ def main(
         primary_terms = list(load_json(Path(keywords)).get("primary_terms", []))
 
     import datetime as _dt
+    import sys
+
+    if not author or not author.strip():
+        raise ValueError("author name is required and must be non-empty")
 
     since_year = _dt.date.today().year - int(years)
-    epmc_hits = _europepmc(author, since_year, max_results)
-    oa_hits = _openalex(author, since_year, max_results)
+    try:
+        epmc_hits = _europepmc(author, since_year, max_results)
+    except Exception as exc:  # noqa: BLE001 — one backend failure shouldn't kill the script
+        print(f"WARNING: EuropePMC search failed for {author}: {exc}", file=sys.stderr)
+        epmc_hits = []
+    try:
+        oa_hits = _openalex(author, since_year, max_results)
+    except Exception as exc:  # noqa: BLE001
+        print(f"WARNING: OpenAlex search failed for {author}: {exc}", file=sys.stderr)
+        oa_hits = []
     records = [
         *(_from_europepmc(hit, author, primary_terms) for hit in epmc_hits),
         *(_from_openalex(hit, author, primary_terms) for hit in oa_hits),

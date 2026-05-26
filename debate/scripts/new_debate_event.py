@@ -42,7 +42,9 @@ def main(
 ) -> Path:
     """Create the event folder + ``inputs.json`` skeleton; print the resulting path."""
     date_str = date or _dt.date.today().isoformat()
-    folder_name = f"{_last_name(scientist_a)}_{_last_name(scientist_b)}_{date_str}_{_hash()}"
+    # Suffix the role letter so two scientists sharing a surname (e.g. 'Raymond Pearl'
+    # vs 'Judea Pearl') produce distinct folder names.
+    folder_name = f"{_last_name(scientist_a)}A_{_last_name(scientist_b)}B_{date_str}_{_hash()}"
     event_dir = DEBATE_EVENTS / folder_name
     event_dir.mkdir(parents=True, exist_ok=True)
 

@@ -457,6 +457,58 @@ def test_build_for_scientist_renders_books_section(tmp_path: Path, monkeypatch):
     assert manifest["books"]["tier2_total"] == 1
 
 
+def test_custom_entries_warns_on_unknown_type():
+    """A typo like type='pdf' instead of type='file' must surface as a warning,
+    not silently drop the source."""
+    out = bb._custom_entries([{"type": "pdf", "label": "Pearl chapter", "tier": 1}])
+    assert len(out) == 1
+    tier, rendered = out[0]
+    assert tier == 1
+    assert "UNKNOWN" in rendered
+    assert "'pdf'" in rendered
+    assert "Pearl chapter" in rendered
+
+
+def test_build_for_scientist_tier3_sample_uses_event_slug_for_seed(tmp_path: Path, monkeypatch):
+    """Two debates featuring the same scientist on different topics get different samples."""
+    cache = tmp_path / "cache"
+    monkeypatch.setattr(bb, "PAPERS_CACHE", cache)
+    records = [
+        {
+            "id": f"id_{i}",
+            "title": f"P{i}",
+            "year": str(2000 + i),
+            "authors": "X",
+            "doi": f"10/x{i}",
+            "abstract": "...",
+            "tier": 3,
+            "pmcid": "",
+            "pmid": "",
+            "is_first_last": False,
+            "topic_match": False,
+        }
+        for i in range(50)
+    ]
+    _seed_works(cache, "test-author", records)
+    _seed_blogs(cache, "test-author", [])
+    _, manifest_a, _ = bb._build_for_scientist(
+        "Test Author",
+        custom_sources=[],
+        n_full_papers_cap=10,
+        n_tier3_sample=10,
+        event_slug="debate-A",
+    )
+    _, manifest_b, _ = bb._build_for_scientist(
+        "Test Author",
+        custom_sources=[],
+        n_full_papers_cap=10,
+        n_tier3_sample=10,
+        event_slug="debate-B",
+    )
+    # Different event_slug → different sample composition (high probability).
+    assert manifest_a["tier3"]["sample_titles"] != manifest_b["tier3"]["sample_titles"]
+
+
 def test_build_for_scientist_books_with_full_text(tmp_path: Path, monkeypatch):
     cache = tmp_path / "cache"
     monkeypatch.setattr(bb, "PAPERS_CACHE", cache)

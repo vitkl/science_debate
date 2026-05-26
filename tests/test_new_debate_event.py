@@ -40,7 +40,8 @@ def test_main_creates_event_folder_with_expected_structure(tmp_path: Path, monke
         date="2026-05-26",
     )
     assert event_dir.is_dir()
-    assert re.fullmatch(r"davidson_arias_2026-05-26_[0-9a-f]{6}", event_dir.name)
+    # Role-letter suffix (A/B) disambiguates same-surname scientists.
+    assert re.fullmatch(r"davidsonA_ariasB_2026-05-26_[0-9a-f]{6}", event_dir.name)
 
     inputs = json.loads((event_dir / "inputs.json").read_text())
     assert inputs["topic"] == "gene regulatory networks"

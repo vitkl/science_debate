@@ -36,14 +36,16 @@ def http_get(
 ) -> requests.Response:
     """GET with rate-limit-aware exponential backoff. Returns the final Response.
 
-    Raises ``requests.HTTPError`` if all retries fail with a non-success status.
-    Honours ``Retry-After`` headers when present on 429/503 responses.
+    Raises ``requests.HTTPError`` immediately on non-{429,503} 4xx responses
+    (no point retrying a 404 or 401). Honours ``Retry-After`` on 429/503 and
+    skips the next backoff sleep so we don't double-wait.
     """
     hdrs = {"User-Agent": DEFAULT_USER_AGENT}
     if headers:
         hdrs.update(headers)
     last_exc: Exception | None = None
-    for attempt, delay in enumerate([0.0, *backoff], start=1):
+    attempts = [0.0, *backoff]
+    for delay in attempts:
         if delay > 0:
             time.sleep(delay)
         try:
@@ -57,9 +59,12 @@ def http_get(
             retry_after = response.headers.get("Retry-After")
             if retry_after and retry_after.isdigit():
                 time.sleep(int(retry_after))
+            last_exc = requests.HTTPError(f"{response.status_code} for {url}", response=response)
             continue
-        if response.status_code < 500 and attempt > 1:
+        if response.status_code < 500:
+            # Hard client error (404, 401, 403, ...) — retrying won't help.
             response.raise_for_status()
+        # 5xx: capture and retry until attempts exhausted.
         last_exc = requests.HTTPError(f"{response.status_code} for {url}", response=response)
     if last_exc is not None:
         raise last_exc
@@ -67,11 +72,22 @@ def http_get(
 
 
 def atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Write bytes via temp-file + ``os.replace`` so partial writes are never visible."""
+    """Write bytes via temp-file + ``os.replace`` so partial writes are never visible.
+
+    Cleans up the temp file on any exception so crashes don't leave ``.tmp.<pid>``
+    litter on disk.
+    """
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_suffix(path.suffix + f".tmp.{os.getpid()}")
-    tmp.write_bytes(data)
-    os.replace(tmp, path)
+    try:
+        tmp.write_bytes(data)
+        os.replace(tmp, path)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
 
 
 def atomic_write_text(path: Path, text: str, encoding: str = "utf-8") -> None:

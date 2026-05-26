@@ -168,6 +168,15 @@ def _custom_entries(custom_sources: list[dict[str, Any]]) -> list[tuple[int, str
             out.append((tier, f"### {label} (file{note})\n{body}"))
         elif kind == "url":
             out.append((tier, f"### {label} (url: {item.get('url')})\n"))
+        else:
+            # Unknown type (e.g., user typo 'pdf' instead of 'file') — surface as a
+            # warning entry so the source isn't silently dropped.
+            out.append(
+                (
+                    tier,
+                    f"### {label} (⚠ UNKNOWN custom-source type: {kind!r}; expected one of file/directory/url/note)\n",
+                ),
+            )
     return out
 
 
@@ -193,6 +202,7 @@ def _build_for_scientist(
     n_tier1_max: int | None = None,
     n_tier2a_full_max: int | None = None,
     dropped_source_ids: list[str] | None = None,
+    event_slug: str = "",
 ) -> tuple[str, dict[str, Any], list[str]]:
     """Return ``(briefing_markdown, manifest_for_this_scientist, needs_summary_paths)``.
 
@@ -307,12 +317,15 @@ def _build_for_scientist(
         "sample_titles": [w.get("title", "") for w in tier2a[:5]],
     }
 
-    # Tier 3 — random sample of papers that are neither author-led nor topic-matching
+    # Tier 3 — random sample of papers that are neither author-led nor topic-matching.
+    # Seed includes event_slug so two debates featuring the same scientist on different
+    # topics get different samples (otherwise the same 15 papers are always picked).
     sample_size = int(n_tier3_sample)
     if len(tier3_works) <= sample_size:
         sampled = list(tier3_works)
     else:
-        rng = random.Random(name)  # deterministic per scientist for reproducibility
+        seed_key = f"{name}::{event_slug}" if event_slug else name
+        rng = random.Random(seed_key)
         sampled = rng.sample(tier3_works, sample_size)
     sections.append(f"\n## Tier 3: random sample ({len(sampled)} of {len(tier3_works)} non-author non-topic papers)\n")
     for record in sampled:
@@ -421,6 +434,7 @@ def main(
     all_needs_summary: list[str] = []
     over_budget_tier1: list[dict[str, Any]] = []
 
+    event_slug = inputs_data.get("event_slug", "") or ""
     for role_letter, info in inputs_data["scientists"].items():
         name = info["name"]
         briefing, manifest, needs = _build_for_scientist(
@@ -431,6 +445,7 @@ def main(
             n_tier1_max=n_tier1_max,
             n_tier2a_full_max=n_tier2a_full_max,
             dropped_source_ids=dropped_map.get(name, []),
+            event_slug=event_slug,
         )
         # Global-cap enforcement on the rendered briefing
         if manifest["briefing_word_count"] > global_cap:
