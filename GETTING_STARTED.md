@@ -1,6 +1,6 @@
 # Getting started — run a scientific debate in your browser
 
-For non-technical users. ~15 minutes from clicking the link to a finished debate article.
+~15 minutes from clicking the link to a finished debate article. No installation, no command line.
 
 ## What this does
 

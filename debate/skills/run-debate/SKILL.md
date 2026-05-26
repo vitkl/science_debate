@@ -91,10 +91,11 @@ Before calling `generate_search_keywords.py`, **you** (the Moderator) think out 
 
 ### B2 — search
 
-For each scientist run, in parallel:
-- `search_works.py --author "<NAME>" --keywords debate_events/<slug>/keywords.json --tier all --out papers_cache/works/<author-slug>.json`
-- `search_blogs.py --scientist "<NAME>" --registry debate/blog_registry.yaml --keywords debate_events/<slug>/keywords.json --out papers_cache/blogs/<scientist-slug>.json`
-- *If* `include_youtube == true`: `search_youtube.py --scientist "<NAME>" --keywords debate_events/<slug>/keywords.json --out papers_cache/youtube_search/<scientist-slug>.json` (auto-picks backend: YouTube Data API v3 when `YOUTUBE_API_KEY` is set, yt-dlp otherwise; prints the chosen backend to stderr — surface it in the conversation so the user knows which path ran)
+For each scientist run, in parallel. **Pass `{author}` / `{scientist}` literally in the `--out` path** — the scripts auto-substitute the canonical slug (lowercase, dash-separated). Do NOT pre-compute a slug yourself; the script's substitution is the source of truth that `build_briefing.py` later reads from.
+
+- `search_works.py --author "<NAME>" --keywords debate_events/<slug>/keywords.json --tier all --out 'papers_cache/works/{author}.json'`
+- `search_blogs.py --scientist "<NAME>" --registry debate/blog_registry.yaml --keywords debate_events/<slug>/keywords.json --out 'papers_cache/blogs/{scientist}.json'`
+- *If* `include_youtube == true`: `search_youtube.py --scientist "<NAME>" --keywords debate_events/<slug>/keywords.json --out 'papers_cache/youtube_search/{scientist}.json'` (auto-picks backend: YouTube Data API v3 when `YOUTUBE_API_KEY` is set, yt-dlp otherwise; prints the chosen backend to stderr — surface it in the conversation so the user knows which path ran)
 
 </section>
 

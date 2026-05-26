@@ -33,7 +33,7 @@ All agents, skills, scripts, and the format/faithfulness/journalism specs live u
 
 Open [claude.ai/code](https://claude.ai/code), load this repo, invoke `/run-debate`. No install. The web sandbox is **ephemeral**: `debate_events/` and `papers_cache/` live only for that session and are lost when it ends. Nothing is downloaded to your local machine. **Run `/export` at the end of the debate to download the full conversation (article + transcript) before closing the tab.**
 
-For a step-by-step walkthrough aimed at non-technical readers, see [GETTING_STARTED.md](GETTING_STARTED.md).
+For a step-by-step walkthrough, see [GETTING_STARTED.md](GETTING_STARTED.md).
 
 ### Recommended for serious use — VSCode plugin, Claude desktop app, or terminal
 
