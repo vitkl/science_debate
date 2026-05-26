@@ -184,6 +184,7 @@ def main(
     keywords: str | None = None,
     works: str | None = None,
     max_results: int = 40,
+    use_llm_filter: bool = False,
 ) -> Path:
     """Discover books by ``scientist`` via OpenAlex (from --works) + Google Books."""
     primary_terms: list[str] = []
@@ -221,6 +222,46 @@ def main(
         key=lambda r: (r.get("tier", 3), -int(r.get("year", "0") or 0) if (r.get("year") or "").isdigit() else 0)
     )
 
+    rejected: list[dict[str, Any]] = []
+    if use_llm_filter and merged:
+        from _llm_classify import classify_candidate, load_cache, save_cache
+
+        out_path_tmp = Path(out)
+        if "{scientist}" in str(out_path_tmp):
+            out_path_tmp = Path(str(out_path_tmp).format(scientist=slug(scientist)))
+        llm_cache_path = out_path_tmp.parent / "_llm_verdict_cache_books.json"
+        llm_cache = load_cache(llm_cache_path)
+        kept: list[dict[str, Any]] = []
+        for book in merged:
+            # Author-match alone admits namesakes ("Religion Is Raced" for Eric
+            # Davidson). LLM checks whether title+description+authors are a
+            # plausible match for the named scientist.
+            keep, reason = classify_candidate(
+                cache_key=book.get("isbn") or book.get("id", ""),
+                scientist=scientist,
+                primary_terms=primary_terms,
+                kind="book",
+                item_fields={
+                    "Title": book.get("title", ""),
+                    "Subtitle": book.get("subtitle", ""),
+                    "Authors": book.get("authors", ""),
+                    "Year": book.get("year", ""),
+                    "Description": (book.get("description", "") or "")[:1500],
+                },
+                question_template=(
+                    "Is this book authored by {scientist} (the scientist), "
+                    "and plausibly relevant to {topic} or to the scientist's research more broadly? "
+                    "Reject namesakes (different person with the same name)."
+                ),
+                cache=llm_cache,
+            )
+            if not keep:
+                rejected.append({**book, "reason": f"llm_rejected: {reason}"})
+                continue
+            kept.append(book)
+        save_cache(llm_cache_path, llm_cache)
+        merged = kept
+
     payload = {
         "scientist": scientist,
         "query": f'inauthor:"{scientist}"',
@@ -228,6 +269,7 @@ def main(
         "n_openalex": len(openalex_books),
         "n_merged": len(merged),
         "books": merged,
+        "rejected": rejected,
     }
     out_path = Path(out)
     if "{scientist}" in str(out_path):

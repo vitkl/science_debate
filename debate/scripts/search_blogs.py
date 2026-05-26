@@ -17,7 +17,6 @@ from typing import Any
 from urllib.parse import urljoin
 
 import fire
-import yaml
 
 try:
     import trafilatura
@@ -25,12 +24,11 @@ except ImportError:  # pragma: no cover - dep is declared but may not be install
     trafilatura = None
 
 from _common import REPO_ROOT, atomic_write_json, http_get, load_json, slug, url_hash
+from _registry import load_registry
 
 
 def _load_registry(registry_path: Path) -> dict[str, list[str]]:
-    with registry_path.open("r", encoding="utf-8") as fh:
-        data = yaml.safe_load(fh) or {}
-    return {name: list(urls) for name, urls in data.items()}
+    return {name: entry.blogs for name, entry in load_registry(registry_path).items()}
 
 
 def _matches_keywords(text: str, keywords: dict[str, Any]) -> bool:
@@ -90,6 +88,7 @@ def main(
     registry: str = "debate/blog_registry.yaml",
     urls: str | None = None,
     discover: bool = False,
+    use_llm_filter: bool = False,
 ) -> Path:
     """Crawl blog index pages for posts authored by ``scientist`` and tier-tag them.
 
@@ -146,7 +145,46 @@ def main(
     out_path = Path(out)
     if "{scientist}" in str(out_path):
         out_path = Path(str(out_path).format(scientist=slug(scientist)))
-    payload = {"scientist": scientist, "url_source": url_source, "index_urls": index_urls, "posts": posts}
+
+    rejected: list[dict[str, Any]] = []
+    if use_llm_filter and posts:
+        from _llm_classify import classify_candidate, load_cache, save_cache
+
+        primary_terms = list(keywords_data.get("primary_terms", []))
+        llm_cache_path = out_path.parent / "_llm_verdict_cache_blogs.json"
+        llm_cache = load_cache(llm_cache_path)
+        kept: list[dict[str, Any]] = []
+        for post in posts:
+            # Only gate tier-2 posts (no keyword in title); tier-1 are already
+            # topic-confirmed by the cheap matcher and don't need an LLM call.
+            if post.get("tier") == 2 and post.get("url") and not post.get("_warning"):
+                keep, reason = classify_candidate(
+                    cache_key=post["url"],
+                    scientist=scientist,
+                    primary_terms=primary_terms,
+                    kind="blog_post",
+                    item_fields={"Title": post.get("title", ""), "URL": post.get("url", "")},
+                    question_template=(
+                        "Is this a blog post written by {scientist} "
+                        "(or directly summarising their own work) on a topic plausibly "
+                        "related to {topic}?"
+                    ),
+                    cache=llm_cache,
+                )
+                if not keep:
+                    rejected.append({**post, "reason": f"llm_rejected: {reason}"})
+                    continue
+            kept.append(post)
+        save_cache(llm_cache_path, llm_cache)
+        posts = kept
+
+    payload = {
+        "scientist": scientist,
+        "url_source": url_source,
+        "index_urls": index_urls,
+        "posts": posts,
+        "rejected": rejected,
+    }
     atomic_write_json(out_path, payload)
     print(f"{out_path} ({len(posts)} candidate posts from {len(index_urls)} index URLs; source={url_source})")
     return out_path

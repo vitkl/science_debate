@@ -50,6 +50,14 @@ Use small batches; the user may have ADHD — keep each batch ≤ 3 questions. P
 - **Batch 3 — ingestion**: per-scientist free-text instruction (default = the tier description below); `n_full_papers_cap` (default 25, the maximum Tier-2a full-text papers); `n_tier3_sample` (default 15, the random-sample size for papers that are neither first/last-author nor topic-matching); `custom_sources` (optional per-scientist list — see schema below; includes `type: url` for one-off URLs).
 - **Batch 4 — models**: model per role for PresenterA, PresenterB, Reviewer-scientist, Journalist (default Opus). Tell the user the Moderator (you) runs Sonnet by default; teammates do **not** inherit lead model — you specify each one explicitly at spawn.
 
+- **Batch 5 — borderline-candidate review mode** (single AskUserQuestion): how to handle YouTube videos / blog posts / books that pass the cheap heuristics but are borderline (multi-speaker interview, surname-only namesake risk, no topic-keyword in title)? Options:
+  - **Moderator reads the short list (default, recommended, no extra cost)** — search scripts mark borderline items with `needs_review: true` in the cache JSON; the Moderator scans them as part of B3a / B2b / B2c and either keeps or drops via `Edit`. Works for all three sources.
+  - **Skip review entirely** — keep all candidates that pass the cheap filter. Cheapest, lowest precision.
+  - **LLM subagent** — Moderator spawns an `Explore` subagent per scientist that reads the borderline list and returns a verdict list. Protects Moderator context, no SDK dependency.
+  - **Direct Anthropic SDK call** — pass `--use-llm-filter` to `search_youtube.py` / `search_blogs.py` / `search_books.py`; each script calls Haiku-4.5 itself per borderline item. Requires `ANTHROPIC_API_KEY`. Verdicts cached per item.
+
+  Persist the choice to `debate_events/<slug>/inputs.json::ingestion.review_mode` (`moderator` | `skip` | `subagent` | `api`). At B3a / B2b / B2c the Moderator branches on this value.
+
 **Default ingestion instruction** (the tier description): *"Read this scientist's work in three tiers and stop when you have enough. **Tier 1** — work directly about the debate topic AND by the scientist (papers, blog posts, book chapters, recorded-talk transcripts where they are the speaker). **Tier 2** — first/last-author papers (any topic; full text up to `n_full_papers_cap` / `n_tier2a_full_max`) OR middle-author papers that match the debate topic (abstract only). **Tier 3** — neither first/last-author nor topic-matching: a random seeded sample of `n_tier3_sample` abstracts (default 15)."*
 
 **`custom_sources` schema** (handles uploaded files on claude.ai/code web, local file paths in VSCode/desktop, full directories of e.g. non-OA PDFs, and inline notes):

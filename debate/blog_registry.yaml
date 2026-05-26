@@ -1,11 +1,22 @@
-# blog_registry.yaml — known scientific bloggers used by search_blogs.py
+# blog_registry.yaml — per-scientist registry used by search_blogs.py and
+# search_youtube.py.
 #
-# Each top-level key is a scientist's full name (as written in inputs.json).
-# The value is a list of one or more blog URLs (homepage or index page).
-# search_blogs.py reads this file in registry mode and crawls each listed
-# URL for posts matching the debate's keywords.json.
+# Two supported shapes per scientist:
 #
-# Extend freely. Use search_blogs.py --discover to surface candidates.
+# 1. Legacy flat list (blogs only):
+#       Lior Pachter:
+#         - https://liorpachter.wordpress.com/
+#
+# 2. Mapping with optional ``blogs`` + ``youtube_hints``:
+#       Eric Davidson:
+#         blogs: []
+#         youtube_hints:
+#           name_variants: ["Eric H. Davidson"]
+#           affiliations: ["Caltech", "California Institute of Technology"]
+#           topic_aliases: ["sea urchin", "gene regulatory network"]
+#
+# Both shapes are read by the shared loader in debate/scripts/_registry.py.
+# Extend freely. Use search_blogs.py --discover to surface blog candidates.
 
 Lior Pachter:
   - https://liorpachter.wordpress.com/
@@ -15,3 +26,24 @@ Ewan Birney:
 
 Valentine Svensson:
   - http://www.nxn.se/
+
+Eric Davidson:
+  blogs: []
+  youtube_hints:
+    name_variants: ["Eric H. Davidson", "Eric H Davidson"]
+    affiliations: ["Caltech", "California Institute of Technology", "MBL", "Marine Biological Laboratory"]
+    topic_aliases: ["sea urchin", "gene regulatory network", "GRN", "cis-regulatory"]
+
+Alfonso Martinez Arias:
+  blogs: []
+  youtube_hints:
+    name_variants: ["Alfonso Martínez Arias", "Alfonso Martinez-Arias"]
+    affiliations: ["Cambridge", "Pompeu Fabra", "UPF", "Wellcome"]
+    topic_aliases: ["gastruloid", "self-organisation", "self-organization", "stem cell", "embryoid"]
+
+James Briscoe:
+  blogs: []
+  youtube_hints:
+    name_variants: []
+    affiliations: ["Francis Crick Institute", "Crick Institute", "Allen Institute", "Company of Biologists", "ICTP", "Jacques Loeb Centre"]
+    topic_aliases: ["morphogen", "neural tube", "Shh", "Sonic Hedgehog", "pattern formation"]

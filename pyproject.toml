@@ -33,7 +33,7 @@ dependencies = [
   # for debug logging (referenced from the issue template)
   "session-info2",
   "trafilatura",
-  "youtube-transcript-api",
+  "youtube-transcript-api>=1.2",
   "yt-dlp",
 ]
 # https://docs.pypi.org/project_metadata/#project-urls
@@ -129,6 +129,11 @@ strict = true
 testpaths = [ "tests" ]
 addopts = [
   "--import-mode=importlib", # allow using test files with same name
+  "-m",
+  "not network",
+]
+markers = [
+  "network: live external-API smoke tests; opt in with `pytest -m network`",
 ]
 
 [tool.coverage]

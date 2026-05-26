@@ -6,23 +6,29 @@ Search strategy:
     appearance formats (lecture, talk, keynote, seminar, interview, podcast,
     conversation, plus one topic-boosted query). Dedupe by video_id.
   - **Speaker filter**: keep only videos where the scientist is plausibly
-    speaking. Heuristic: (a) channel name contains scientist surname or full
-    name (own channel / lab channel), OR (b) title OR description contains
-    scientist's name AND title OR description contains a speaking-context word.
-    Drops third-party talks ABOUT the scientist that don't feature them.
-  - **Tier assignment** (mirrors the abstract-search tier model):
-    - Tier 1: speaker-confirmed AND topic-matching (title or description hits
-      a primary keyword)
-    - Tier 2: speaker-confirmed but no topic match
+    speaking. Signals (any one suffices, see ``_is_speaker``):
+      1. Channel is on the institutional allowlist (publisher/conference
+         channel, OR per-scientist affiliation from blog_registry.yaml)
+         AND the scientist's name appears in the title or description.
+      2. Channel contains BOTH first AND last name (personal channel).
+      3. Title speaker patterns (name + speaker verb, colon prefix, etc.).
+      4. Description speaker attribution patterns
+         ("interview with NAME", "speaker: NAME", …).
+    Surname-only channel match is NOT a signal — it admits namesakes
+    (musicians, realtors) without adding real institutional talks.
+  - **Tier assignment**: tier 1 = speaker + topic match, tier 2 = speaker only.
 
 Two backends:
-  - **YouTube Data API v3** (preferred when ``YOUTUBE_API_KEY`` is set):
-    faster, more reliable, 100 quota units per search → ~700 units per
-    scientist for the 7 multi-queries.
-  - **yt-dlp** (zero-config fallback): scrapes YouTube. ~10-15 s per scientist
-    for the 7 queries. yt-dlp's extract_flat returns shorter descriptions, so
-    description-based filtering on the yt-dlp path will miss content the API
-    path would catch.
+  - **YouTube Data API v3** (preferred when ``YOUTUBE_API_KEY`` is set).
+  - **yt-dlp** (zero-config fallback).
+
+CLI extras:
+  - ``--dump-rejected SLUG``: print the full rejected list from the cache
+    JSON at ``papers_cache/youtube_search/<SLUG>.json`` and exit. Use for
+    diagnosing recall problems.
+  - ``--use-llm-filter``: route borderline candidates (multi-speaker or no
+    topic-keyword in title) through a Haiku call asking "is this a
+    scientific talk by X?". Requires ``ANTHROPIC_API_KEY``.
 """
 
 from __future__ import annotations
@@ -33,7 +39,8 @@ from pathlib import Path
 
 import fire
 import requests
-from _common import atomic_write_json, http_get, load_json, slug
+from _common import PAPERS_CACHE, atomic_write_json, http_get, load_json, slug
+from _registry import YoutubeHints, get_entry
 
 YOUTUBE_SEARCH = "https://www.googleapis.com/youtube/v3/search"
 
@@ -62,6 +69,53 @@ QUERY_TEMPLATES = (
     '"{scientist}" conversation',
 )
 
+# Always-on institutional / conference / publisher channels that frequently
+# host scientific talks. Matched case-insensitively as substring of the
+# channel name. Per-scientist affiliations (from blog_registry.yaml) are
+# unioned with this set at filter time.
+INSTITUTIONAL_CHANNELS = (
+    "allen institute",
+    "company of biologists",
+    "embo",
+    "ictp",
+    "hhmi",
+    "howard hughes",
+    "mbl",
+    "marine biological laboratory",
+    "royal society",
+    "ted",
+    "tedx",
+    "lex fridman",
+    "mindscape",
+    "sean carroll",
+    "huberman lab",
+    "santa fe institute",
+    "perimeter institute",
+    "kavli",
+    "francis crick",
+    "crick institute",
+    "wellcome",
+    "embl",
+    "cshl",
+    "cold spring harbor",
+    "janelia",
+    "mpg",
+    "max planck",
+    "caltech",
+    "mit opencourseware",
+    "mit ",
+    "stanford",
+    "berkeley",
+    "cambridge university",
+    "oxford",
+    "princeton",
+    "harvard",
+    "ucl",
+    "ucsf",
+    "lex clips",
+    "world science festival",
+)
+
 # Long-form interview / podcast channels that frequently host scientists.
 # Per-channel queries surface episodes where the title is just "Episode #N: Name"
 # (the host's channel) — channel handles are stable, human-readable, and resolve
@@ -76,9 +130,6 @@ PODCAST_CHANNELS = (
     ("Andrew Huberman", "Huberman Lab", "@hubermanlab"),
 )
 
-# Heuristic triggers for marking a result as multi-speaker so the briefing
-# renderer can flag it and summarise-for-debate / scientist agents apply
-# speaker-attribution care. Channel match in PODCAST_CHANNELS also triggers it.
 MULTI_SPEAKER_TITLE_HINTS = (
     "interview",
     "podcast",
@@ -90,58 +141,101 @@ MULTI_SPEAKER_TITLE_HINTS = (
     "panel",
 )
 
-PER_QUERY_RESULTS = 10  # 7 queries × 10 = up to 70 candidates pre-dedupe
+PER_QUERY_RESULTS = 10
 
 
-def _is_speaker(scientist: str, title: str, channel: str, description: str) -> bool:
+def _channel_is_institutional(chan_l: str, hints: YoutubeHints) -> bool:
+    """True if channel matches the global allowlist OR a per-scientist affiliation."""
+    if not chan_l:
+        return False
+    for tag in INSTITUTIONAL_CHANNELS:
+        if tag in chan_l:
+            return True
+    for aff in hints.affiliations:
+        if aff and aff.lower() in chan_l:
+            return True
+    return False
+
+
+def _personal_channel(chan_l: str, scientist: str) -> bool:
+    """True only if BOTH first and last name appear in channel (e.g. 'Judea Pearl Channel').
+
+    Surname-only is intentionally rejected — admits 'Eric Davidson Music' /
+    'Davidson Realty' false positives.
+    """
+    if not chan_l or not scientist:
+        return False
+    parts = scientist.lower().split()
+    if len(parts) < 2:
+        return False
+    first, last = parts[0], parts[-1]
+    return first in chan_l and last in chan_l
+
+
+def _name_in(text_l: str, scientist: str, hints: YoutubeHints) -> bool:
+    """Scientist's full name (or any registry-provided variant) appears in text."""
+    if not text_l:
+        return False
+    if scientist and scientist.lower() in text_l:
+        return True
+    for variant in hints.name_variants:
+        if variant and variant.lower() in text_l:
+            return True
+    return False
+
+
+def _is_speaker(
+    scientist: str,
+    title: str,
+    channel: str,
+    description: str,
+    hints: YoutubeHints | None = None,
+) -> bool:
     """Strict speaker filter: does the scientist actually speak in this video?
 
-    Three signals (any one suffices):
-      1. **Channel match** — scientist's own channel or lab channel (surname or full
-         name appears in channel title).
-      2. **Title speaker patterns** — name appears in the title in a pattern that
-         CLAIMS the scientist as the subject/speaker:
-            - Title starts with the name ("Judea Pearl on causality")
-            - Colon-prefix to name (": Judea Pearl") — common for interview series
-              like "Lex Fridman #56: Judea Pearl"
-            - Name adjacent to a speaker verb ("Pearl talks", "interview with Pearl")
-            - Preposition + name ("with Pearl", "by Pearl")
-      3. **Description speaker attribution** — explicit "interview with NAME",
-         "by NAME", "featuring NAME", "guest: NAME", "speaker: NAME", etc.
+    Signals (any one suffices):
+      1. Channel is institutional / known affiliation AND scientist's name appears
+         in title or description.
+      2. Channel is a personal channel (both first AND last name in channel).
+      3. Title speaker patterns (name + speaker verb, colon prefix, etc.).
+      4. Description speaker attribution patterns
+         ("interview with NAME", "speaker: NAME", …).
 
-    Drops false positives like third-party talks that *mention* the scientist
-    in passing (e.g. "Sara Mostafavi on graphs (Pearl framework reference)").
+    Surname-only channel match is intentionally NOT a signal.
     """
     if not scientist:
         return False
+    hints = hints or YoutubeHints()
     surname = scientist.lower().split()[-1]
     full = scientist.lower()
     title_l = (title or "").lower()
     chan_l = (channel or "").lower()
     desc_l = (description or "").lower()
 
-    # 1. Channel match
-    if surname in chan_l or full in chan_l:
+    # 1. Institutional channel + name appears anywhere.
+    if _channel_is_institutional(chan_l, hints) and (
+        _name_in(title_l, scientist, hints) or _name_in(desc_l, scientist, hints)
+    ):
         return True
 
-    # 2. Title speaker patterns
+    # 2. Personal channel (first AND last name).
+    if _personal_channel(chan_l, scientist):
+        return True
+
+    # 3. Title speaker patterns.
     if full in title_l or surname in title_l:
         for n in (full, surname):
-            # Name at the very start of the title
             if title_l.startswith(n):
                 return True
-            # Colon-prefix to name (e.g., "Lex Fridman #56: Judea Pearl")
             if f": {n}" in title_l:
                 return True
-            # Name adjacent to speaker verb (both orders)
             for v in SPEAKER_VERBS:
                 if f"{n} {v}" in title_l or f"{v} {n}" in title_l or f"{v} with {n}" in title_l:
                     return True
-            # Preposition + name
             if f"with {n}" in title_l or f"by {n}" in title_l:
                 return True
 
-    # 3. Description speaker attribution
+    # 4. Description speaker attribution.
     if full in desc_l or surname in desc_l:
         for n in (full, surname):
             for pat in (
@@ -165,7 +259,6 @@ def _is_speaker(scientist: str, title: str, channel: str, description: str) -> b
 
 
 def _assign_yt_tier(title: str, description: str, primary_terms: list[str]) -> int:
-    """Tier 1 if topic-matching, tier 2 if speaker-only (caller already confirmed speaker)."""
     if not primary_terms:
         return 2
     haystack = f"{title or ''} {description or ''}".lower()
@@ -175,18 +268,12 @@ def _assign_yt_tier(title: str, description: str, primary_terms: list[str]) -> i
 
 
 def _is_multi_speaker(channel: str, title: str, channel_ids: dict[str, str]) -> bool:
-    """Heuristic: True if the video is likely a host-led interview/podcast (multiple speakers).
-
-    Triggered when (a) the channel matches a known PODCAST_CHANNELS entry, OR
-    (b) the title contains a clear interview / podcast / conversation hint.
-    """
     chan_l = (channel or "").lower()
     if any(host.lower() in chan_l or name.lower() in chan_l for host, name, _ in PODCAST_CHANNELS):
         return True
-    # Channel ID match via resolved cache (cross-language safe)
     if channel_ids:
         for handle, cid in channel_ids.items():
-            if cid and cid.lower() == chan_l:  # channel sometimes appears as ID, not name
+            if cid and cid.lower() == chan_l:
                 return True
             if handle.lstrip("@").lower() == chan_l:
                 return True
@@ -194,12 +281,52 @@ def _is_multi_speaker(channel: str, title: str, channel_ids: dict[str, str]) -> 
     return any(hint in title_l for hint in MULTI_SPEAKER_TITLE_HINTS)
 
 
-def _resolve_channel_handles(api_key: str, cache_path: Path) -> dict[str, str]:
-    """Resolve PODCAST_CHANNELS handles to channel IDs via YouTube Data API.
+def _is_borderline(hit: dict, primary_terms: list[str], channel_ids: dict[str, str]) -> bool:
+    """Borderline candidate: passes speaker filter but warrants extra scrutiny.
 
-    Caches results in ``cache_path`` to avoid repeated lookups across debates.
-    Falls back to empty dict on failure (per-channel queries simply won't run).
+    Triggered when (a) the video is multi-speaker (host + scientist; risk of
+    mis-attribution) or (b) the title doesn't contain any topic keyword
+    (could be a tangentially-related appearance).
     """
+    if _is_multi_speaker(hit.get("channel", ""), hit.get("title", ""), channel_ids):
+        return True
+    if not primary_terms:
+        return False
+    title_l = (hit.get("title", "") or "").lower()
+    return not any(t.lower() in title_l for t in primary_terms)
+
+
+def _llm_verdict(
+    scientist: str,
+    hit: dict,
+    primary_terms: list[str],
+    cache: dict[str, dict],
+) -> tuple[bool, str]:
+    """Ask Haiku-4.5 whether this is a real scientific talk by ``scientist``.
+
+    Thin wrapper around the shared ``_llm_classify.classify_candidate``.
+    """
+    from _llm_classify import classify_candidate
+
+    return classify_candidate(
+        cache_key=hit.get("video_id", ""),
+        scientist=scientist,
+        primary_terms=primary_terms,
+        kind="youtube_video",
+        item_fields={
+            "Title": hit.get("title", ""),
+            "Channel": hit.get("channel", ""),
+            "Description": (hit.get("description_full") or "")[:2000],
+        },
+        question_template=(
+            "Is this a scientific talk, lecture, or interview in which "
+            "{scientist} is the featured speaker, on a topic plausibly related to {topic}?"
+        ),
+        cache=cache,
+    )
+
+
+def _resolve_channel_handles(api_key: str, cache_path: Path) -> dict[str, str]:
     cache: dict[str, str] = {}
     if cache_path.exists():
         try:
@@ -229,7 +356,6 @@ def _resolve_channel_handles(api_key: str, cache_path: Path) -> dict[str, str]:
 
 
 def _channel_queries(scientist: str, channel_ids: dict[str, str]) -> list[tuple[str, str]]:
-    """Per-podcast-channel queries — returns list of (query, channel_id) pairs."""
     out: list[tuple[str, str]] = []
     for _host, _name, handle in PODCAST_CHANNELS:
         cid = channel_ids.get(handle, "")
@@ -238,8 +364,17 @@ def _channel_queries(scientist: str, channel_ids: dict[str, str]) -> list[tuple[
     return out
 
 
-def _queries_for(scientist: str) -> list[str]:
-    return [tpl.format(scientist=scientist) for tpl in QUERY_TEMPLATES]
+def _queries_for(scientist: str, hints: YoutubeHints | None = None) -> list[str]:
+    hints = hints or YoutubeHints()
+    queries = [tpl.format(scientist=scientist) for tpl in QUERY_TEMPLATES]
+    # Add affiliation-anchored queries — surface institutional talks that
+    # don't carry the scientist's name in channel title.
+    for aff in hints.affiliations[:3]:
+        queries.append(f'"{scientist}" "{aff}"')
+    # Variant names (e.g. "Eric H. Davidson") as bare lecture queries.
+    for variant in hints.name_variants[:2]:
+        queries.append(f'"{variant}" lecture')
+    return queries
 
 
 def _topic_boost_query(scientist: str, keywords_data: dict) -> str | None:
@@ -297,12 +432,6 @@ def _search_via_api(
 
 
 def _search_via_ytdlp(scientist: str, query: str, max_results: int) -> list[dict] | dict:
-    """Two-pass yt-dlp: flat search for candidate IDs, then full extract for descriptions.
-
-    Without the second pass, ``extract_flat=True`` returns near-empty descriptions
-    and the speaker filter's description-screening branch never fires — letting
-    third-party talks slip through whose title omits the scientist's name.
-    """
     try:
         from yt_dlp import YoutubeDL  # type: ignore
     except ImportError as exc:
@@ -323,11 +452,7 @@ def _search_via_ytdlp(scientist: str, query: str, max_results: int) -> list[dict
         return {"failure_reason": f"yt-dlp search error: {exc}"}
 
     entries = (info or {}).get("entries", []) or []
-    full_opts = {
-        "quiet": True,
-        "no_warnings": True,
-        "skip_download": True,
-    }
+    full_opts = {"quiet": True, "no_warnings": True, "skip_download": True}
     surname = scientist.lower().split()[-1] if scientist else ""
     results: list[dict] = []
     with YoutubeDL(full_opts) as ydl:
@@ -340,10 +465,6 @@ def _search_via_ytdlp(scientist: str, query: str, max_results: int) -> list[dict
             channel = entry.get("channel") or entry.get("uploader", "")
             title = entry.get("title", "")
             description = entry.get("description") or ""
-            # Quick pre-filter: do a full fetch only if the scientist name plausibly
-            # appears in the title OR channel (cheap heuristic to avoid paying the
-            # second-pass cost on obvious negatives). For the speaker-filter to
-            # consider description-only hits later, fetch full metadata.
             needs_full = (surname and surname in (title.lower() + " " + channel.lower())) or (
                 not description and bool(surname)
             )
@@ -381,7 +502,6 @@ def _run_searches(
     api_key: str | None,
     max_results: int,
 ) -> tuple[list[dict], list[dict]]:
-    """Run all queries (general + per-channel), dedupe by video_id, return (results, failures_log)."""
     seen: dict[str, dict] = {}
     failures: list[dict] = []
     for q in queries:
@@ -389,14 +509,13 @@ def _run_searches(
             outcome = _search_via_api(scientist, q, api_key, max_results)
         else:
             outcome = _search_via_ytdlp(scientist, q, max_results)
-        if isinstance(outcome, dict):  # failure dict
+        if isinstance(outcome, dict):
             failures.append({"query": q, **outcome})
             continue
         for hit in outcome:
             vid = hit["video_id"]
             if vid not in seen:
                 seen[vid] = hit
-    # Per-channel queries — API-only; yt-dlp doesn't expose channelId search cleanly.
     if api_key:
         for q, cid in channel_queries:
             outcome = _search_via_api(scientist, q, api_key, min(int(max_results), 5), channel_id=cid)
@@ -410,21 +529,52 @@ def _run_searches(
     return list(seen.values()), failures
 
 
+def _dump_rejected(scientist_slug: str) -> int:
+    """Print the full rejected list for a slug from its cache JSON.
+
+    Use to diagnose recall complaints ("why isn't talk X kept?").
+    """
+    path = PAPERS_CACHE / "youtube_search" / f"{scientist_slug}.json"
+    if not path.exists():
+        print(f"no cache at {path}", file=sys.stderr)
+        return 1
+    payload = load_json(path)
+    rejected = payload.get("rejected", []) or payload.get("rejected_sample", [])
+    print(f"# {scientist_slug} — {len(rejected)} rejected videos")
+    for r in rejected:
+        print(f"- [{r.get('reason', '?')}] {r.get('title', '')[:90]}")
+        print(f"    channel: {r.get('channel', '')}")
+        if r.get("description_excerpt"):
+            print(f"    desc:    {r['description_excerpt'][:200].replace(chr(10), ' ')}")
+        if r.get("url"):
+            print(f"    url:     {r['url']}")
+    return 0
+
+
 def main(
-    scientist: str,
-    out: str,
+    scientist: str = "",
+    out: str = "",
     *,
-    keywords: str,
+    keywords: str = "",
     max_results: int = PER_QUERY_RESULTS,
     api_key_env: str = "YOUTUBE_API_KEY",
-) -> Path:
+    use_llm_filter: bool = False,
+    dump_rejected: str = "",
+) -> Path | int:
     """Multi-query YouTube search filtered for scientist-as-speaker, tier-assigned."""
+    if dump_rejected:
+        return _dump_rejected(dump_rejected)
+    if not scientist or not out or not keywords:
+        raise ValueError("scientist, out, and keywords are required (unless --dump-rejected is set)")
+
     out_path = Path(out)
     if "{scientist}" in str(out_path):
         out_path = Path(str(out_path).format(scientist=slug(scientist)))
     keywords_data = load_json(Path(keywords))
 
-    queries = _queries_for(scientist)
+    hints = get_entry(scientist).youtube_hints
+
+    queries = _queries_for(scientist, hints)
     topic_q = _topic_boost_query(scientist, keywords_data)
     if topic_q:
         queries.append(topic_q)
@@ -444,7 +594,6 @@ def main(
             file=sys.stderr,
         )
 
-    # Resolve podcast-channel handles to channel IDs (cached across debates).
     channel_ids: dict[str, str] = {}
     if api_key:
         channel_ids = _resolve_channel_handles(
@@ -464,42 +613,70 @@ def main(
     )
     primary_terms = list(keywords_data.get("primary_terms", []))
 
+    from _llm_classify import load_cache, save_cache
+
+    llm_cache_path = out_path.parent / "_llm_verdict_cache_youtube.json"
+    llm_cache: dict[str, dict] = load_cache(llm_cache_path) if use_llm_filter else {}
+
     kept: list[dict] = []
     rejected: list[dict] = []
     for hit in candidates:
-        if not _is_speaker(scientist, hit.get("title", ""), hit.get("channel", ""), hit.get("description_full", "")):
+        title = hit.get("title", "")
+        channel = hit.get("channel", "")
+        desc_full = hit.get("description_full", "")
+        if not _is_speaker(scientist, title, channel, desc_full, hints):
             rejected.append(
                 {
                     "video_id": hit["video_id"],
-                    "title": hit.get("title", ""),
-                    "channel": hit.get("channel", ""),
+                    "title": title,
+                    "channel": channel,
+                    "description_excerpt": hit.get("description_excerpt", ""),
+                    "url": hit.get("url", ""),
                     "reason": "not_speaker",
                 }
             )
             continue
-        tier = _assign_yt_tier(hit.get("title", ""), hit.get("description_full", ""), primary_terms)
-        multi = _is_multi_speaker(hit.get("channel", ""), hit.get("title", ""), channel_ids)
+        # Optional LLM "is-it-a-science-talk" gate for borderline candidates.
+        if use_llm_filter and _is_borderline(hit, primary_terms, channel_ids):
+            keep, reason = _llm_verdict(scientist, hit, primary_terms, llm_cache)
+            if not keep:
+                rejected.append(
+                    {
+                        "video_id": hit["video_id"],
+                        "title": title,
+                        "channel": channel,
+                        "description_excerpt": hit.get("description_excerpt", ""),
+                        "url": hit.get("url", ""),
+                        "reason": f"llm_rejected: {reason}",
+                    }
+                )
+                continue
+        tier = _assign_yt_tier(title, desc_full, primary_terms)
+        multi = _is_multi_speaker(channel, title, channel_ids)
+        needs_review = _is_borderline(hit, primary_terms, channel_ids)
         kept.append(
             {
                 "video_id": hit["video_id"],
                 "url": hit["url"],
-                "title": hit["title"],
-                "channel": hit["channel"],
+                "title": title,
+                "channel": channel,
                 "published_at": hit["published_at"],
                 "description_excerpt": hit.get("description_excerpt", ""),
                 "tier": tier,
-                "scientist_channel_match": (slug(scientist).split("-")[-1] in (hit.get("channel", "").lower()))
-                or (scientist.lower() in (hit.get("channel", "").lower())),
-                # When true, the transcript has multiple speakers (host + scientist, or panel)
-                # and downstream consumers (build_briefing renderer, summarise-for-debate,
-                # scientist agent) must apply speaker-attribution care to avoid mis-quoting
-                # the host's words to the scientist.
+                "channel_institutional": _channel_is_institutional(channel.lower(), hints),
                 "multi_speaker": multi,
+                # Moderator-review hint: passed cheap heuristics but is borderline
+                # (multi-speaker, OR no topic keyword in title). Default review path
+                # is the Moderator scanning these before B3a confirmation.
+                "needs_review": needs_review,
                 # Filled by the Moderator after AskUserQuestion confirmation. Until set
                 # true, fetch_fulltext.py will skip transcript download for this video.
                 "user_confirmed": False,
             }
         )
+
+    if use_llm_filter:
+        save_cache(llm_cache_path, llm_cache)
 
     payload = {
         "scientist": scientist,
@@ -508,6 +685,7 @@ def main(
         "results": kept,
         "rejected_count": len(rejected),
         "rejected_sample": rejected[:5],
+        "rejected": rejected,
         "failures": failures,
     }
     atomic_write_json(out_path, payload)

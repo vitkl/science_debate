@@ -261,6 +261,11 @@ def _fetch_book(book: dict[str, Any]) -> dict[str, Any] | None:
 
 def _fetch_youtube_transcript(video_id: str) -> dict[str, Any] | None:
     from youtube_transcript_api import YouTubeTranscriptApi  # type: ignore
+    from youtube_transcript_api._errors import (  # type: ignore
+        NoTranscriptFound,
+        TranscriptsDisabled,
+        VideoUnavailable,
+    )
 
     out_dir = PAPERS_CACHE / "transcripts"
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -268,9 +273,10 @@ def _fetch_youtube_transcript(video_id: str) -> dict[str, Any] | None:
     if text_path.exists():
         return {"path": str(text_path), "video_id": video_id, "source": "youtube", "cached": True}
     try:
-        segments = YouTubeTranscriptApi.get_transcript(video_id)
-    except Exception as exc:  # noqa: BLE001
+        fetched = YouTubeTranscriptApi().fetch(video_id)
+    except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable) as exc:
         return {"video_id": video_id, "source": "youtube", "warning": f"transcript unavailable: {exc}"}
+    segments = fetched.to_raw_data() if hasattr(fetched, "to_raw_data") else list(fetched)
     text = " ".join(seg["text"] for seg in segments)
     atomic_write_text(text_path, text)
     return {"path": str(text_path), "video_id": video_id, "source": "youtube", "cached": False}
