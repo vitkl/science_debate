@@ -228,5 +228,6 @@ Print a final summary to the user containing:
 3. The total transcript word count.
 4. **Models used per role** — Moderator (your model), Scientist A, Scientist B, Reviewer C, Journalist — as picked at Phase A Batch 4.
 5. **Cost / usage** — the contents of `usage.json` in human-readable form. For subscribers, that's per-session end-of-debate context-window tokens + plan-usage-bar delta. For API users, that's per-session `Total cost (USD)` and `Total duration (API)`, plus a grand total.
+6. **A SAVE-NOW reminder** for users on claude.ai/code (web): *"⚠️ This sandbox is ephemeral. To keep the outputs, run `/export` now to download the full conversation (article + transcript), or scroll up and copy-paste the article into a document. See [GETTING_STARTED.md](../../../GETTING_STARTED.md) for details."* Show this reminder regardless of surface — it's a no-op on local installs but critical on web.
 
 </section>
