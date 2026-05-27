@@ -4,7 +4,7 @@ This file is the single source of truth for the debate format. Every agent defin
 
 ## Cast (five roles)
 
-- **Moderator** — the lead Claude Code session. Sets up the team, runs the stage clock, prints the stage table when `run-debate` is invoked, materialises stages as TODOs once the debate starts, holds audience questions, and may nudge a scientist to wrap up when they're near their word target with no conclusion in sight. Default model: **Sonnet** (the role is procedural).
+- **Moderator** — the lead Claude Code session. Sets up the team, runs the stage clock, prints the stage table when `run-debate` is invoked, materialises stages as TODOs once the debate starts, reads per-stage files and concatenates them into `transcript.md`, prints each new stage as a formatted markdown block to chat, runs the audience-break sequence, renders per-break audio segments, runs the `/usage` baseline/delta, and may nudge a scientist to wrap up when they're near their word target with no conclusion in sight. Default model: **`claude-opus-4-7[1m]`** (1M-context Opus — the role is no longer purely procedural; cumulative context from Phase B briefings + Phase C transcript reads exceeds 200k for an 80-minute debate).
 - **Presenter** — a scientist agent in "present my case" mode. Faithful to the source scientist's actual views and style.
 - **Opponent** — same scientist agent switched to "critique the other's case" mode. Faithfulness still binds.
 - **Reviewer** — a third scientist agent who has not presented; evaluates both sides and surfaces the most-productive remaining disagreement. Receives the collaborative-rigorous tone block (below).
@@ -25,14 +25,29 @@ Word counts are *targets at default `total_minutes = 80`*. When the user sets a 
 | 5 | A critiques B | Opponent A | 7 | 700 | no |
 | 6 | B responds | Presenter B | 5 | 500 | yes |
 | 7 | Reviewer assessment (round 1) | Reviewer C | 4 | 400 | yes |
-| 8 | Final rejoinders A → B (round 1) | A, B as Presenter | 4 + 4 | 400 + 400 | yes |
+| 8 | Final rejoinders A → B (round 1) | A, B as Presenter — runs as **sub-stages 8a then 8b** (sequential; B reads transcript including A's just-appended 8a before composing 8b — real-room order) | 4 + 4 | 400 + 400 | yes (single break after the pair, i.e. after 8b) |
 | 9 | Reviewer assessment (round 2) | Reviewer C | 4 | 400 | yes |
-| 10 | Final rejoinders A → B (round 2) | A, B as Presenter | 4 + 4 | 400 + 400 | yes |
+| 10 | Final rejoinders A → B (round 2) | A, B as Presenter — runs as **sub-stages 10a then 10b** (same shape as 8a/8b) | 4 + 4 | 400 + 400 | yes (single break after 10b) |
 | — | Journalist write-up | Journalist | n/a | ~500–600 (≈2 GDocs pages), user-tunable | (end) |
+
+## Clarifying-question rounds
+
+After stages **1, 2, 3, 5** the Moderator runs an intra-stage clarifying-question round before the audience break (if any). The two non-speakers each ask the stage's speaker one ≤30-word clarifying question; the speaker answers each in ≤50 words. The round is sequential in real-room order: Q from first non-speaker → A from speaker → Q from second non-speaker → A from speaker. Word targets are truthful but unenforced (the Moderator does not truncate overruns).
+
+Speaker per round:
+
+| After stage | Speaker | Askers (in turn order) |
+|---|---|---|
+| 1 (Presenter A talk) | A | B, then C |
+| 2 (Presenter B talk) | B | A, then C |
+| 3 (Opponent B critiques A) | B | A, then C |
+| 5 (Opponent A critiques B) | A | B, then C |
+
+Each utterance becomes its own per-stage file (`stage_<NN>_q<n>_<asker>.md`, `stage_<NN>_a<n>_<speaker>.md`). The Moderator concatenates each into `transcript.md` as the round progresses. Clarifying rounds do NOT trigger audience breaks — those still fire only after stages listed below.
 
 ## Audience break-points
 
-After stages 1, 2, 4, 6, 7, 8, 9, 10 the Moderator pauses and asks the user (the audience) for a question, comment, or "continue". Default audience-time budget: ~3 minutes (~300 words). Audience text is logged as `Audience: …` in `transcript.md` and forwarded as a labelled message to the next relevant agent before the next stage starts.
+After stages 1, 2, 4, 6, 7, 8, 9, 10 the Moderator pauses and asks the user (the audience) for a question, comment, or "continue". Default audience-time budget: ~3 minutes (~300 words). Audience text is double-written: one JSONL line to `audience.log` (structured audit) and one `**Audience:** <text>` block concatenated into `transcript.md` at the clock stage. Forwarded responses (multi-target sequential, A → B → C in turn order) become per-stage files `audience_q<NN>_<X>.md` that the Moderator concatenates into the transcript as they land — so the next target reads the prior target's response before composing.
 
 ## Transcript line format
 

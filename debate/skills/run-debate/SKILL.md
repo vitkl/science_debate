@@ -12,6 +12,19 @@ You are the **Moderator**. Walk the user through the format, prepare the materia
 
 </section>
 
+<section purpose="Normative role definition for the Moderator (this lead session). Establishes that the Moderator is a non-expert show-runner: no content direction, no paraphrasing of scientist arguments back to scientists, no summarising of substance to the user. Owns: the clock, the per-teammate read-offset map (last_read_line[X]), JSON-parsing of replies, concatenation of per-stage files into transcript.md, printing new transcript regions as markdown blocks to chat, audience-break sequencing, per-break audio rendering. Scientists own writes to per-stage files. The rest of the skill (especially Phase C1) is read against this banner.">
+
+## Moderator role: non-expert show-runner
+
+You do **not** hold faithfulness to any source scientist; you do **not** direct content. Concretely:
+
+- You **never paraphrase a prior stage** back to a scientist. You **never tell a scientist what to "cover" or "remember to address"**. You **never summarise the substance of the debate to the user** in any chat output that isn't a verbatim print of a per-stage file body.
+- Scientists own writes to their per-stage files (`stage_<NN>_<sub>_<X>.md`, `audience_q<NN>_<X>.md`). You own reads + concatenation into `transcript.md` (running derivation) + printing the new region back to chat in readable markdown so the audience can react at break-points.
+- Scientists reply with one-line JSON per `scientist.md` §Reply contract. You parse, validate, `Read` the per-stage file, concatenate, print. If you catch yourself drafting a content-shaped instruction, delete it and re-send the minimal stage prompt.
+- You track `last_read_line[<X>]` per teammate in memory — each SendMessage names the offset where the teammate should start reading transcript.md (decision #10 segmented reads). Update after every concatenation.
+
+</section>
+
 <section purpose="First-run setup: ensure Python deps are installed via the env-aware wrapper, so every downstream `debate/scripts/*.py` invocation just works regardless of surface (local conda vs claude.ai web sandbox).">
 
 ## Phase 4.0 — install Python deps (first-run only)
@@ -43,12 +56,47 @@ Read `.claude/settings.json`. If `env.CLAUDE_CODE_EXPERIMENTAL_AGENT_TEAMS != "1
 
 Use small batches; the user may have ADHD — keep each batch ≤ 3 questions. Persist answers to `debate_events/<slug>/inputs.json`.
 
+### Phase A opener — freshness check + `/usage` baseline
+
+Before Batch 1, `/run-debate` performs two pre-flight checks:
+
+1. **Freshness check.** `/run-debate` is expected to start in a **fresh VSCode conversation** — the orchestration accumulates context across Phases A/B/C in one cumulative session. If the current conversation has prior user turns (i.e. this is not the first user message), OR if `ls debate_events/` shows an in-progress event-folder without an `inputs.json` `complete: true` flag AND no explicit `--resume <slug>` argument was passed, `AskUserQuestion`:
+   > *"This conversation has prior turns / there's an in-progress event at `<slug>`. `/run-debate` runs best in a fresh conversation. Options: (a) Start a fresh conversation (recommended — stop here, open a new VSCode chat, re-invoke `/run-debate`), (b) Resume `<slug>` from where it left off (only if you crashed mid-debate), (c) Force fresh-start anyway in this conversation (accept that prior context will compete for tokens)."*
+
+   On (a): exit cleanly with a one-line *"Please start a fresh conversation."*. On (b): set `RESUME_SLUG=<slug>`, skip Batch 1–4 (read from `inputs.json`), jump to the unfinished phase. On (c): proceed.
+
+2. **`/usage` baseline.** Run `/usage` in this Moderator session and parse the four named fields per role: `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Write `debate_events/<RESUME_SLUG or tbd-slug>/usage_baseline.json` (deferred until after B0 if slug isn't yet known). The end-of-Phase-C `/usage` re-capture computes the Moderator's debate-only delta = now − baseline.
+
+### Phase A batches
+
 - **Batch 1 — required**: scientist A name; scientist B name; scientist C name (Reviewer); one-sentence debate topic.
 - **Batch 2 — debate shape + media toggles**: `total_minutes` (default 80); `give_collaborative_tone_to_presenters?` (default *no*); `journalist_word_budget` (default 500–600); `allow_websearch_during_debate?` (default *no*); `include_youtube?` (default *yes* — works out of the box via yt-dlp); `include_books?` (default *yes* — uses OpenAlex + Google Books + Open Library/IA, all free, no key).
   - <section purpose="YouTube works without setup via yt-dlp (zero-config fallback). If the user has YOUTUBE_API_KEY in their env (e.g. set in ~/.claude/settings.json), the script auto-prefers the API backend. Either way, no user action required in Phase A — the dispatch is automatic in search_youtube.py.">YouTube search works out of the box via yt-dlp; no setup needed. If `YOUTUBE_API_KEY` is set in the env (e.g. in `~/.claude/settings.json`), the script automatically prefers the YouTube Data API v3 backend (faster, more reliable, 10 000 free queries/day) — otherwise it transparently falls back to yt-dlp page-scraping. Either way, no Phase A action required: `search_youtube.py` picks the backend itself and prints which one it used to stderr so the user sees it.</section>
   - **Persist Batch 2 answers via Edit to `debate_events/<slug>/inputs.json::ingestion.include_youtube` and `…include_books`** before starting Phase B — the answers control whether `search_youtube.py` and `search_books.py` run.
 - **Batch 3 — ingestion**: per-scientist free-text instruction (default = the tier description below); `n_full_papers_cap` (default 25, the maximum Tier-2a full-text papers); `n_tier3_sample` (default 15, the random-sample size for papers that are neither first/last-author nor topic-matching); `custom_sources` (optional per-scientist list — see schema below; includes `type: url` for one-off URLs).
-- **Batch 4 — models**: model per role for PresenterA, PresenterB, Reviewer-scientist, Journalist (default Opus). Tell the user the Moderator (you) runs Sonnet by default; teammates do **not** inherit lead model — you specify each one explicitly at spawn.
+- **Batch 4 — models per role** (5 roles, one AskUserQuestion per role; lists all 4 model IDs as distinct options with `(recommended)` / `(200k budget)` annotation):
+
+  Available model IDs (harness-accepted forms; use exact strings):
+  - `claude-opus-4-7[1m]` — Opus 4.7, **1M-token context**. For roles where total prompt plausibly exceeds 180k tokens.
+  - `claude-opus-4-7` — Opus 4.7, **200k-token context**. Default for bounded prompts.
+  - `claude-sonnet-4-6` — Sonnet 4.6 (200k). Budget pick for procedural / bounded-input roles.
+  - `claude-haiku-4-5-20251001` — Haiku 4.5. Reserved for short formulaic prompts; **never recommend for content roles**.
+
+  Per-role recommendations (default + 200k-budget alternative):
+
+  | Role | Default (1M-friendly) | 200k-budget alternative | Rationale |
+  |------|-----------------------|--------------------------|-----------|
+  | **Moderator** (lead session) | `claude-opus-4-7[1m]` *(recommended)* | `claude-opus-4-7` *(200k budget — risky; cumulative context from briefings + transcript reads exceeds 200k for a default 80-min debate)* | The Moderator runs Phases A/B5/C in one cumulative session; reads transcript regions and prints stage blocks. No longer purely procedural. |
+  | **Scientist A** (Presenter A) | `claude-opus-4-7[1m]` *(recommended)* | `claude-opus-4-7` *(200k budget — only if A-side briefing < 150k tokens after B4 sanity check)* | Receives full A-side briefing (200–400k tokens for exhaustive briefing). |
+  | **Scientist B** (Presenter B) | `claude-opus-4-7[1m]` *(recommended)* | `claude-opus-4-7` *(200k budget)* | Symmetric to A. |
+  | **Scientist C** (Reviewer) | `claude-opus-4-7` *(recommended)* | `claude-sonnet-4-6` *(200k budget)* | Reviewer briefing typically fits in 200k; post-B4 sanity check upgrades to 1M if not. |
+  | **Journalist J** | `claude-opus-4-7` *(recommended)* | `claude-sonnet-4-6` *(200k budget)* | Inputs = finished transcript; fits in 200k easily. |
+
+  Run one `AskUserQuestion` per role with all four model IDs as options. Annotate the default as *"(recommended — 1M for full briefing headroom)"* and the 200k fallback as *"(200k budget — see table)"*. Persist to `inputs.json::models.<role>` (`models.Moderator`, `models.A`, `models.B`, `models.C`, `models.J`).
+
+  **Post-B4 briefing-size sanity check** (per §6 step 6.3): after B4 builds the briefings, compute `briefing_tokens_est = word_count × 1.35` for each of A, B, C. If `est > 180_000` AND the picked model is `claude-opus-4-7` (200k), `AskUserQuestion`: *"<role>'s briefing is ~<est:,> tokens (> 180k headroom). Picked variant is 200k. Upgrade to claude-opus-4-7[1m]?"* — accept yes/no. Persist updated pick into `inputs.json::models.<role>`. Skip J — its input is the finalised transcript, bounded by Phase C output.
+
+- **Batch 4.5 — voice picker** (after model picker, before B0): seeds the per-role Kokoro voice assignment used at audio render time. Moderator prints the proposed voice assignment table (6 roles × Kokoro voice — gender-matched scientists first, distinct voices for Moderator / Audience / Journalist) and `AskUserQuestion`: *"Voice assignment: (a) Accept proposed, (b) Edit (type `<role>=<voice>` lines in Other), (c) Suggest alternative gender-matched assignment, (d) Show full Kokoro voice catalogue."* Persist to `debate_events/<slug>/voice_map.json` (deferred until after B0 if slug isn't yet known). Then `bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_audio.py --warmup` — downloads the ~330 MB Kokoro model on first run; fails fast (with the `pip install kokoro soundfile pydub` / `brew install ffmpeg` advice) if missing.
 
 - **Batch 5 — borderline-candidate review mode** (single AskUserQuestion): how to handle YouTube videos / blog posts / books that pass the cheap heuristics but are borderline (multi-speaker interview, surname-only namesake risk, no topic-keyword in title)? Options:
   - **Moderator reads the short list (default, recommended, no extra cost)** — search scripts mark borderline items with `needs_review: true` in the cache JSON; the Moderator scans them as part of B3a / B2b / B2c and either keeps or drops via `Edit`. Works for all three sources.
@@ -80,11 +128,40 @@ Use small batches; the user may have ADHD — keep each batch ≤ 3 questions. P
 
 Run scripts via `bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/<script>.py …`.
 
+**Task-wording convention.** Every instruction sent to a teammate that produces a persistent artefact must use the form *"Persist `<X>` to `<absolute-path>`"* — not "Draft", "Write", or "Generate". The teammate is expected to use the `Write` tool to commit the artefact to the named path before its reply — the reply is a JSON confirmation (per `scientist.md` §Reply contract), not the artefact itself. If a reply contains prose where the file should be, treat it as off-contract: re-send with *"You did not persist to `<path>`. Use the Write tool now."* (cap at 2 retries, then escalate via `AskUserQuestion`).
+
 <section purpose="Create the per-debate working directory with a slug derived from scientists + date + session-id hash; merge Phase A answers into the skeleton inputs.json.">
 
 ### B0 — event folder
 
 `new_debate_event.py --scientist_a "<A>" --scientist_b "<B>" --scientist_c "<C>" --topic "<topic>"` creates `debate_events/<A-last>_<B-last>_<YYYY-MM-DD>_<6hash>/` with an `inputs.json` skeleton. Merge Phase A answers into it.
+
+</section>
+
+<section purpose="Source cast affiliations (title, affiliation, notes) via WebSearch with user confirmation, before any briefing fetching begins. Also infer a rough voice-gender guess per scientist (one-shot heuristic; not user-confirmed separately — the user-facing voice decision happens via the voice picker in Phase A). Persists into inputs.json::scientists.<X>.{title, affiliation, notes, voice_gender_guess, sourced} so downstream rendering (§4 compose_full_event.py cast line; §4 voice_map seeding) has structured data instead of ad-hoc prose.">
+
+### B0.5 — cast affiliations + voice-gender guess (WebSearch-confirmed)
+
+After B0 writes the `inputs.json` skeleton and Batch 1 names are merged, and **before** any briefing fetching begins, source each scientist's current affiliation and a rough voice-gender guess. Runs only if WebSearch is enabled (default); otherwise fall back to user-supplied affiliations with `sourced: "user_only"`.
+
+For each scientist in {A, B, C}:
+
+1. `WebSearch` *"<full name> affiliation title current OR most recent"*. Prefer institutional pages over Wikipedia. For deceased scientists, capture dates + the framing *"represented faithfully from his/her published work"*. In the same WebSearch round, also infer a rough **voice-gender guess** — one of `female`, `male`, `nonbinary`, `unknown` — i.e. what would the listener expect them to sound like (transgender accommodation: self-identified gender wins). This is NOT user-confirmed separately; the user-facing decision is the role→voice assignment via the voice picker in Phase A (§4 voice picker — populates `voice_map.json`).
+
+2. Draft a `{title, affiliation, notes, voice_gender_guess}` dict. Surface via `AskUserQuestion`:
+   > *"Affiliation for `<name>` — confirm: `<title>, <affiliation>` (notes: `<notes>`). Voice-gender guess: `<guess>`. Options: (a) confirm as-is, (b) edit inline, (c) re-search."*
+
+3. On (c), loop back to step 1 with the user's refinement (ORCID, institution, paper title, etc.).
+
+4. `Edit` `inputs.json::scientists.<X>` to add `{title, affiliation, notes, voice_gender_guess, sourced}`. `sourced` is `"websearch"` if WebSearch ran; `"user_only"` if WebSearch was disabled or returned nothing useful and the user entered by hand.
+
+**Hard rules:**
+- Load-bearing structure for `affiliation`: title prefix + department/programme + institution and city. For deceased scientists, `notes` carries dates + faithfulness disclaimer. Examples:
+  - Alfonso Martinez Arias — *"ICREA Research Professor, Systems Bioengineering, Universitat Pompeu Fabra, Barcelona"*
+  - Eric Davidson — *"Norman Chandler Professor of Cell Biology, Caltech, 1937–2015; represented faithfully from his published work"*
+  - James Briscoe — *"Principal Group Leader, Francis Crick Institute; Editor-in-Chief, Development"*
+- WebSearch runs by default; the only way to skip is if the user explicitly disabled the WebSearch toggle in Phase A.
+- Re-runs on the same slug short-circuit if all three scientists already have non-null `title`+`affiliation` and `sourced != null`. Print *"Cast affiliations already sourced; skipping WebSearch."*
 
 </section>
 
@@ -212,24 +289,103 @@ Semantics: `needs_user_decision.json` lists scientists whose briefing still exce
 
 </section>
 
+<section purpose="Post-B4 briefing-size sanity check. If any scientist's briefing exceeds the 180k-token headroom AND the user picked the 200k-context model variant in Batch 4, prompt to upgrade to the 1M variant. Catches model/briefing-size mismatches before they crash the debate.">
+
+### B4.5 — briefing-size sanity check vs picked model
+
+After B4 completes (all three briefings exist on disk), compute per-scientist briefing-token estimate `briefing_tokens_est = word_count × 1.35` (whitespace-split word count across all briefing artefacts a teammate will receive at spawn). Write to `debate_events/<slug>/briefing_size_check.json`:
+
+```jsonc
+{"A": {"words": 142000, "tokens_est": 191700, "model_picked": "claude-opus-4-7", "needs_upgrade": true},
+ "B": {"words": 88000,  "tokens_est": 118800, "model_picked": "claude-opus-4-7[1m]", "needs_upgrade": false},
+ "C": {"words": 32000,  "tokens_est": 43200,  "model_picked": "claude-opus-4-7", "needs_upgrade": false}}
+```
+
+`needs_upgrade = (tokens_est > 180_000) AND (model_picked == "claude-opus-4-7")`. The 180k threshold leaves ~20k headroom for skill text + scratch space + tool-result inflation.
+
+For each role where `needs_upgrade == true`: `AskUserQuestion` *"`<role>`'s briefing is ~`<est:,>` tokens (> 180k headroom). Picked variant is 200k (`claude-opus-4-7`). Upgrade to `claude-opus-4-7[1m]` (1M)?"* — yes / no / drop sources further.
+
+On yes: `Edit` `inputs.json::models.<role>` to `claude-opus-4-7[1m]`. On no: warn user that the teammate may truncate context silently. On drop-further: jump back to B4 Round 2 with `dropped_source_ids` editing.
+
+Journalist `J` excluded — its input is the finalised transcript, bounded by Phase C output.
+
+</section>
+
+<section purpose="Single team-creation point. Spawn the three scientist teammates ONCE for the entire debate. The same teammate objects persist through B5a, B5b, and every stage of Phase C. Handshake-verify identity, then write team.json as the single source of truth for slot ↔ surname ↔ briefing.">
+
+### B5_pre — spawn scientist team (single creation point)
+
+After B4 completes (briefings exist on disk), create the three scientist teammates **once** for the entire debate. The same teammate objects persist through B5a (self-intro), B5b (talk prep), and every stage of Phase C.
+
+Use ONE natural-language create-team instruction to the Agent Teams layer. The teammate `name` field is the scientist's **surname** (so `SendMessage({to: "Martinez Arias", ...})` is the routing call); the `team_name` is the event slug (same identifier as `debate_events/<slug>/` folder name — one identifier, no separate construction). Render the pairings on separate lines so they cannot scramble:
+
+> *"Create an agent team named `<slug>` (the event-folder slug, e.g. `ariasA_davidsonB_2026-05-26_c7893c`). Spawn three scientist teammates (`scientist` agent type). Do NOT inherit my model. Use these exact pairings — each row is one teammate:*
+>
+> *- name: `<surname of A>` ⟶ slot A, model `<model_for_A from inputs.json>`, briefing `debate_events/<slug>/briefing_A.md`*
+> *- name: `<surname of B>` ⟶ slot B, model `<model_for_B>`, briefing `debate_events/<slug>/briefing_B.md`*
+> *- name: `<surname of C>` ⟶ slot C, model `<model_for_C>`, briefing `debate_events/<slug>/briefing_C.md`*
+>
+> *The `name` field is the surname (one or two words, no titles, no first names) — stable for the entire debate, no phase suffix. File naming inside `debate_events/<slug>/` continues to use the slot letter (`briefing_A.md`, `intro_A.md`, `talk_A.md`, `stage_03_A.md`) — only the routing handle uses the surname. WebSearch is `{enabled|disabled}` for this debate."*
+
+Then send each teammate a one-shot handshake message:
+
+> *"Handshake. Reply with exactly this JSON on a single line, nothing else:*
+> *`{"name":"<your name>","slot":"<your slot letter>","scientist_name":"<the real name you understand yourself to represent>","briefing_path":"<the path you were given>"}`"*
+
+Parse each reply. **Verify** that `name` matches the surname you assigned, `slot` ∈ {A, B, C}, `scientist_name` matches `inputs.json::scientists.<slot>.name`, and `briefing_path` matches `debate_events/<slug>/briefing_<slot>.md`. If any mismatch: surface to user, ask Agent Teams layer to clean up the team, re-spawn from the top of B5_pre.
+
+On all-confirm, write `debate_events/<slug>/team.json`:
+
+```jsonc
+{
+  "team_name": "<slug>",
+  "A": {
+    "name": "<surname>",
+    "scientist_name": "<full name from inputs.json>",
+    "briefing_path": "debate_events/<slug>/briefing_A.md",
+    "identity_confirmed": true,
+    "model": "<model id, populated from inputs.json:models[A]>",
+    "voice": "<kokoro voice id from voice_map.json — populated by §4 voice picker>"
+  },
+  "B": { /* same shape, slot B */ },
+  "C": { /* same shape, slot C */ }
+}
+```
+
+`team.json` is the single source of truth for every subsequent stage that addresses a teammate by surname. Do NOT pass `briefing_path` again in later prompts — the teammate already has it and already confirmed it.
+
+</section>
+
 <section purpose="Each scientist (A, B, C) writes a self-introduction grounded in their briefing; the assess-transcript-faithfulness skill critiques each draft; 3 iterations or pass-early. Goal: catch generic-LLM voice before the debate starts.">
 
-### B5a — self-intros (3 iterations)
+### B5a — self-intros (scientist self-iterates, 3 iterations or pass-early)
 
-For each of A, B, C: spawn the scientist teammate (`scientist` agent type, model from Batch 4) with name `A`/`B`/`C`. Send *"You are <real name>; read your briefing at debate_events/<slug>/briefing_<X>.md. Write a 300–1000 word self-introduction covering (a) who you are and how you got here, (b) your view on the debate topic. Aim for high faithfulness — see debate/FAITHFULNESS.md."* Invoke `/assess-transcript-faithfulness` on the reply; relay the top 3 fixes back to the scientist. Iterate **3 times** (or stop earlier if the critic returns *pass*). Commit the final intro to `debate_events/<slug>/intro_<X>.md`.
+For each of A, B, C: address the scientist teammate spawned in B5_pre by their **surname** (`SendMessage({to: "<surname>", ...})`; mapping from slot letter → surname lives in `debate_events/<slug>/team.json`). Send a single instruction:
+
+> *"Briefing at `debate_events/<slug>/briefing_<X>.md`. Write a 300–1000 word self-introduction covering (a) who you are and how you got here, (b) your view on the debate topic. Per `scientist.md` §Self-assessment + self-persistence, iterate up to 3 times: each iteration save `intro_<X>_draft<N>.md`, self-invoke `/assess-transcript-faithfulness`, revise. When you pass or reach draft 3, also save to `intro_<X>.md`. Reply with JSON only per `scientist.md` §Reply contract."*
+
+Parse the JSON reply (single-line; keys `stage_id`, `file_path`, `word_count`, `faithfulness`, `iteration`, optional `top_issues`). Verify the canonical file exists by `Read`-ing the `file_path` from the JSON. Do NOT read the draft files. Do NOT invoke `/assess-transcript-faithfulness` yourself — the skill description forbids Moderator invocation.
+
+If the reply has `faithfulness: "fail_after_3"`, record the `top_issues` in Moderator memory and surface a warning at the B6 review gate so the user can choose to re-iterate manually or proceed.
 
 </section>
 
 <section purpose="Talk preparation for A and B only (C doesn't present): three-iteration length-reduction shape from 2× target down to target, with faithfulness pass at each step. Stage 1 / 2 in Phase C then deliver this prepared text near-verbatim.">
 
-### B5b — talk preparation (3 iterations, A and B only)
+### B5b — talk preparation (scientist self-iterates, A and B only)
 
-Compute `talk_target = stage-1/2 word budget` (1500 at default `total_minutes=80`; scales as `1500 × total_minutes / 80`). For each of A, B:
-- *"Draft 1: ~2× target (~3000 words at default), expansive — cover all the arguments and evidence you'd raise. Don't worry about length yet."* → faithfulness pass.
-- *"Draft 2: cut to target (≈ {talk_target} words), tighten to your most-essential argument."* → faithfulness pass.
-- *"Draft 3: final polish, exactly target ±10%, ready to deliver."* → final.
+Compute `talk_target = stage-1/2 word budget` (1500 at default `total_minutes=80`; scales as `1500 × total_minutes / 80`). For each of A, B, address the teammate by surname and send a single instruction:
 
-Commit to `debate_events/<slug>/talk_<X>.md`. Stages 1 and 2 in Phase C deliver this text near-verbatim.
+> *"Briefing at `debate_events/<slug>/briefing_<X>.md`. Prepare your stage-1/2 talk in three iterations, per `scientist.md` §Self-assessment:
+> - Draft 1 (~2× target, ~{2 × talk_target} words): expansive — cover all arguments and evidence. Save as `talk_<X>_draft1.md`, self-assess, revise.
+> - Draft 2 (≈ {talk_target} words): cut to target, keep most-essential argument. Save as `talk_<X>_draft2.md`, self-assess, revise.
+> - Draft 3 (target ±10%): final polish. Save as `talk_<X>_draft3.md`, self-assess.
+>
+> When draft 3 passes (or after the third self-assessment regardless), also save the final text to `talk_<X>.md`. Reply with JSON only per `scientist.md` §Reply contract."*
+
+Verify `talk_<X>.md` exists for both A and B by `Read`-ing the `file_path` from each JSON reply. Do NOT read its content. Stages 1 and 2 in Phase C deliver this text near-verbatim (the scientist re-reads its own file then).
+
+If a reply has `faithfulness: "fail_after_3"`, surface a warning at the B6 review gate alongside the B5a flag.
 
 </section>
 
@@ -260,23 +416,115 @@ Then show 5 sample titles per tier per scientist, the final intros, the final ta
 
 ## Phase C — orchestrate the debate
 
+**Task-wording convention (Phase C).** Same as Phase B: every per-teammate instruction that produces a persistent artefact uses *"Persist `<X>` to `<absolute-path>`"* — naming the exact per-stage file path. The teammate writes the file via the `Write` tool and replies with the JSON contract from `scientist.md` §Reply contract. If the reply violates the contract (prose where the file should be, missing JSON, malformed JSON, or `word_count` not an int): re-prompt up to 2× with original instruction prepended by *"Your previous reply did not match the JSON contract — reply per `scientist.md` §Reply contract"*; after 2 retries, `AskUserQuestion` surfacing the bad reply verbatim.
+
 <section purpose="Spawn the agent team in one natural-language instruction; lock per-role model picks (teammates do not inherit lead model); materialise the stage table as TODOs so the user sees progress.">
 
-### C0 — team setup
+### C0 — spawn journalist + stage TODOs
 
-Once the user says GO, materialise the [FORMAT.md stage table](../../FORMAT.md#stage-table) as TODOs so progress is visible. Then create the team in natural language: *"Create an agent team for the debate. Spawn three scientist teammates (`scientist` agent type) named A, B, C with their respective briefing paths. Spawn one journalist teammate (`journalist` agent type) named J. Use models: A=<>, B=<>, C=<>, J=<>. Do not inherit my model. WebSearch is {enabled|disabled} for this debate."*
+Once the user says GO:
+
+1. Materialise the [FORMAT.md stage table](../../FORMAT.md#stage-table) as TODOs so progress is visible. **Include the 4 clarifying-question rounds (after stages 1, 2, 3, 5) as intra-stage sub-TODOs** per FORMAT.md §Clarifying-question rounds — these are not separate stages but intra-stage micro-steps.
+
+2. Confirm `debate_events/<slug>/team.json` exists with A/B/C entries (created in B5_pre) and `team_name = <slug>`. If absent, halt and surface a Moderator-bug error — B5_pre should have written it.
+
+3. Spawn the journalist teammate **into the same team** (`team_name: <slug>`). Give it `name: "Journalist"` (literal surname-slot string), model from inputs.json Batch 4 (`models.J`). Do NOT respawn A/B/C — they already exist and carry the intro + talk context built up in B5a/B5b.
+
+4. Handshake the journalist:
+
+   > *"Handshake. Reply with exactly this JSON on a single line:*
+   > *`{"name":"Journalist","slot":"J","role":"journalist"}`"*
+
+5. On confirm, `Edit` `debate_events/<slug>/team.json` to append the `J` entry (slot-letter key `J`, `name: "Journalist"`, `scientist_name: null`, `briefing_path: null`, `identity_confirmed: true`, `model: <id>`, `voice: <kokoro voice from voice_map.json>`). On mismatch: respawn `J` only — do not touch the scientist teammates.
 
 </section>
 
-<section purpose="The 10 debate stages. Stages 1–2 deliver prepared talks (no fresh generation); 3–10 are live exchanges. Append every utterance to transcript.md with speaker-prefixed lines; nudge agents toward conclusion if they near their word target.">
+<section purpose="Seed transcript.md from intros + team.json. Initialise audience.log as empty. compose_transcript.py builds the structure compose_full_event.py later expects, so the live transcript is consistent from the first stage concatenation.">
 
-### C1 — stages 1–10
+### C0c — seed transcript.md and audience.log
 
-For **stages 1 and 2** (deliver prepared talk): send the scientist teammate *"Stage <1|2>: deliver your prepared opening at `debate_events/<slug>/talk_<X>.md`. Minor adjustments allowed (e.g. a sentence connecting to your self-intro), but stay close to the prepared text — the faithfulness work is already done."*
+```bash
+bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/compose_transcript.py \
+  --event-dir "debate_events/<slug>/"
+```
 
-For **stages 3–10**: send a single message to the relevant teammate with stage number, role, word target (per FORMAT.md, scaled by `total_minutes / 80`), and the path to `transcript.md` so far. Append each reply to `transcript.md` with prefix `<Scientist real name> representative agent: …` (or `Reviewer (<Scientist C real name>):` for stages 7 and 9). Print the same prefixed line in the conversation.
+The script reads `inputs.json` (topic, scientists), `team.json` (slot → surname mapping), `intro_<A>.md`, `intro_<B>.md`, `intro_<C>.md`, and writes:
 
-You may send a brief reminder if a reply approaches its word target without a conclusion: *"You're at <current>/<target> words; please wrap up your point."*
+- `debate_events/<slug>/transcript.md` seeded with: H1 `# <topic>`, `## Self-introductions` with three `### <surname> (Presenter A|B|Reviewer)` subsections (body verbatim from each `intro_<X>.md`), Moderator welcome line, empty `## The debate` heading (ready for Phase C1 concatenations).
+- `debate_events/<slug>/audience.log` as an empty file (so `compose_full_event.py` at C4 never faces a missing-file edge case).
+
+Defaults to skip-if-exists; pass `--force` to clobber (rare — used when re-seeding after a mid-debate restart).
+
+After this step, initialise the Moderator's in-memory `last_read_line[<X>]` map: for each of A, B, C, set `last_read_line[<X>] = wc -l debate_events/<slug>/transcript.md` (the line count after seed). Each scientist's first SendMessage in Phase C1 will name `last_read_line[<X>] + 1` as the offset.
+
+</section>
+
+<section purpose="The 10 debate stages. Stages 1 and 2 deliver prepared talks (per-stage main files). Stages 3–10 are live exchanges, with intra-stage clarifying-question rounds after 1, 2, 3, 5 (per FORMAT.md §Clarifying-question rounds), and dual-speaker sub-stages 8a/8b + 10a/10b (per FORMAT.md). Each utterance writes its own per-stage file; Moderator concatenates into transcript.md and prints to chat; audience breaks fire after FORMAT.md break-point stages; per-break audio segments rendered to clickable mp3 paths.">
+
+### C1 — stages 1–10 (per-stage files, JSON contract, segmented reads, clarifying rounds, dual sub-stages, per-break audio)
+
+**Mandatory per-stage sequence** (no reordering). For each main stage (and each clarifying sub-step and audience-response):
+
+1. **SendMessage** to the relevant teammate by surname, per template below (segmented offset + per-stage file path + JSON contract).
+2. **Parse JSON reply** (single-line, `{stage_id, file_path, word_count}` per `scientist.md` §Reply contract). On parse failure / missing file / `word_count` not int: re-prompt up to 2× with original instruction prepended by *"Your previous reply did not match the JSON contract — reply per `scientist.md` §Reply contract"*; after 2 retries, `AskUserQuestion` surfacing the bad reply.
+3. **Read the per-stage file** at `file_path`. This is the Moderator's first sight of the content.
+4. **Concatenate into `transcript.md`** (Moderator-owned write):
+   - Main stage: append `## Stage <NN> — <FORMAT.md title> (<speaker surname>)\n<speaker surname>: <body>\n\n` (use `### Stage 8a/8b/10a/10b — …` for dual sub-stages).
+   - Clarifying Q: append `**<asker surname> → <speaker surname> (clarifying):** <body>\n\n`.
+   - Clarifying A: append `<speaker surname> (responding to <asker surname>): <body>\n\n`.
+   - Audience-response: append `<target surname> (responding to audience): <body>\n\n`.
+5. **Print the new transcript region to chat** as formatted markdown — H2/H3 heading + body — directly readable by the user. Never re-print earlier stages.
+6. **Update `last_read_line[<X>]`** for every teammate whose transcript region just grew → current EOF (Moderator memory only, not persisted).
+7. **At audience break-points** (after stages 1, 2, 4, 6, 7, 8, 9, 10 per FORMAT.md): render the per-break audio segment immediately:
+
+   ```bash
+   bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_audio.py \
+     --event-dir "debate_events/<slug>/" --segment <NN>
+   ```
+
+   Print the resulting clickable path to chat: `**Audio:** [audio_break_<NN>.mp3](debate_events/<slug>/audio_break_<NN>.mp3) (click to play)`. THEN proceed to C2 audience break.
+
+**Per-stage SendMessage templates** (omit the surrounding `*"..."*` quotes in the actual SendMessage body; they're just formatting markers here):
+
+*Stages 1 and 2 (deliver prepared talk — main):*
+
+> *"Stage `<1|2>` (main). Deliver your prepared opening at `debate_events/<slug>/talk_<X>.md` (re-read it now; minor adjustments allowed). Word target `<target>` (truthful — overruns OK, we don't truncate). Read `debate_events/<slug>/transcript.md` from line `<last_read_line[<X>]+1>` to EOF first. Persist your stage to `debate_events/<slug>/stage_<NN>_<X>.md` via the `Write` tool. Reply JSON per `scientist.md` §Reply contract."*
+
+*Stages 3, 4, 5, 6, 7, 9 (single-speaker, live exchange):*
+
+> *"Stage `<N>` as `<Presenter|Opponent|Reviewer>`. Word target `<target>` (scaled by `total_minutes / 80`, per FORMAT.md). Read `debate_events/<slug>/transcript.md` from line `<last_read_line[<X>]+1>` to EOF. Persist your stage to `debate_events/<slug>/stage_<NN>_<X>.md`. Reply JSON."*
+
+*Stages 8a, 8b, 10a, 10b (dual-speaker sub-stages per FORMAT.md):*
+
+> *"Stage `<NNa|NNb>` (final rejoinder, sub-stage). Word target 400 (scaled). Read `debate_events/<slug>/transcript.md` from line `<last_read_line[<X>]+1>` to EOF. Persist to `debate_events/<slug>/stage_<NNsub>_<X>.md` (e.g. `stage_08a_A.md`). Reply JSON."*
+
+For the pair (e.g. 8a then 8b): run sub-stage 8a fully (steps 1–6), then sub-stage 8b. 8b's scientist's `last_read_line[B]+1` is computed AFTER the Moderator concatenated 8a, so B reads A's rejoinder before composing — real-room order. The single audience break fires only after the pair (per FORMAT.md break-point list `1, 2, 4, 6, 7, 8, 9, 10` — break is after `8`, i.e. after 8b, not between 8a and 8b).
+
+**Clarifying-question rounds (after stages 1, 2, 3, 5, per FORMAT.md §Clarifying-question rounds).** These are intra-stage; no audience break inside.
+
+Identify the round's speaker — whoever just wrote the main stage:
+- Stage 1: speaker A (delivered the talk).
+- Stage 2: speaker B.
+- Stage 3: speaker B (Opponent who just critiqued A).
+- Stage 5: speaker A (Opponent who just critiqued B).
+
+Identify the two non-speakers (askers), in alphabetical slot order:
+- Speaker A → askers B then C.
+- Speaker B → askers A then C.
+
+Run four micro-utterances sequentially: **q1** (first asker → speaker) → **a1** (speaker → first asker) → **q2** (second asker → speaker) → **a2** (speaker → second asker). Each one is a full per-stage sequence (steps 1–6 above; no audio render between micros).
+
+*Clarifying-Q template (asker):*
+
+> *"Clarifying Q (≤30 words) to `<speaker surname>` about Stage `<NN>` — what would you ask if you were in the room? Read `debate_events/<slug>/transcript.md` from line `<last_read_line[<asker>]+1>` to EOF. Persist to `debate_events/<slug>/stage_<NN>_q<n>_<asker>.md`. Reply JSON."*
+
+*Clarifying-A template (speaker):*
+
+> *"Answer `<asker surname>`'s clarifying Q (≤50 words) — the question is the last block in the transcript. Read `debate_events/<slug>/transcript.md` from line `<last_read_line[<speaker>]+1>` to EOF. Persist to `debate_events/<slug>/stage_<NN>_a<n>_<speaker>.md`. Reply JSON."*
+
+After all four micros complete: proceed to the audience break-point IF the stage has one (stages 1, 2 do; stages 3, 5 do not, per FORMAT.md).
+
+**Word-target leniency reminder (decision #22).** The Moderator does NOT truncate overruns. If a scientist returns 67 words instead of 50 for a clarifying answer, accept it. The slack is implicit and Moderator-side; scientists see only the target.
 
 </section>
 
@@ -284,7 +532,39 @@ You may send a brief reminder if a reply approaches its word target without a co
 
 ### C2 — audience break-points
 
-After stages **1, 2, 4, 6, 7, 8, 9, 10**, `AskUserQuestion` *"Audience question, comment, or 'continue'?"*. Default audience time = ~3 min = ~300 words. Log to `debate_events/<slug>/audience.log` as `Audience: …`. If non-continue, forward the audience message (prefixed `Audience: …`) to the relevant teammate(s) before proceeding.
+After stages **1, 2, 4, 6, 7, 8, 9, 10** (per FORMAT.md), and AFTER the Moderator has printed the new transcript region to chat AND rendered + linked the per-break audio segment (`audio_break_<NN>.mp3` — see §C1), fire `AskUserQuestion` *"Audience question, comment, or 'continue'?"*. Default audience time = ~3 min = ~300 words.
+
+If the reply is `continue` (or empty): proceed to next stage.
+
+If the reply is non-`continue`, run the audience round (double-write + multi-target forward):
+
+1. `AskUserQuestion` follow-up: *"Forward to: A only / B only / C only / all"* — captures `forwarded_to` as a list of slot letters (one or more of `A`/`B`/`C`).
+
+2. **Double-write the audience text** (decision #20):
+   - **(a)** Append one JSONL line to `debate_events/<slug>/audience.log` capturing the question metadata:
+     ```bash
+     bash scripts/helper_scripts/run_conda_bash.sh -- bash -c "printf '%s\n' \"\$(jq -c -n \
+       --argjson after_stage \"$STAGE_NUM\" \
+       --arg text \"$USER_TEXT\" \
+       --argjson forwarded_to \"$FORWARDED_JSON\" \
+       --arg timestamp_iso \"\$(date -u +%Y-%m-%dT%H:%M:%SZ)\" \
+       '{after_stage: \$after_stage, text: \$text, forwarded_to: \$forwarded_to, timestamp_iso: \$timestamp_iso}')\" >> debate_events/<slug>/audience.log"
+     ```
+     (Fall back to a Python one-liner via `run_python_cmd.sh` if `jq` unavailable.)
+   - **(b)** Concatenate `**Audience:** <verbatim>\n\n` into `transcript.md` at the current clock stage (Moderator-owned write; scientists never touch transcript.md per §3 contract).
+
+3. **Sequential multi-target forwarding** (decision #15) — for each target in `forwarded_to`, in alphabetical slot order (A → B → C):
+   - Look up the target's surname in `team.json`.
+   - SendMessage to that teammate:
+     > *"Audience question after Stage `<N>`: `<verbatim>`. Read `debate_events/<slug>/transcript.md` from line `<last_read_line[<target>]+1>` to EOF (you'll see the audience question and any prior targets' responses). Persist your response to `debate_events/<slug>/audience_q<NN>_<target>.md`. Word budget: ≤500. Reply JSON per `scientist.md` §Reply contract."*
+   - Parse the JSON reply, `Read` the per-stage file, concatenate `<target surname> (responding to audience): <body>\n\n` into `transcript.md`, update `last_read_line[<target>]` = current EOF, print to chat.
+   - The next target in `forwarded_to` then reads transcript.md including the prior target's just-concatenated response — real-room order.
+
+4. **Re-render the audio segment** to include the audience round (overwrite `audio_break_<NN>.mp3`): `bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_audio.py --event-dir debate_events/<slug>/ --segment <NN>`. Print the updated clickable path.
+
+5. Proceed to the next stage.
+
+`audience.log` is initialised empty at C0c (alongside `transcript.md` seeding by `compose_transcript.py`) so downstream readers (`compose_full_event.py`) never face a missing-file edge case — zero interjections is just an empty file.
 
 </section>
 
@@ -312,43 +592,100 @@ summary line to `transcript.md` so downstream tooling can find them.
 
 </section>
 
-<section purpose="End-of-debate cost accounting tailored to the user's subscription tier. Subscribers get /context end-of-debate token counts per session (the primary signal) plus plan-usage-bar delta as a rough plan-cost proxy. API users get the Session block from /usage. Then clean up the team.">
+<section purpose="End-of-debate close-out: token accounting via /usage baseline/delta (Moderator) + summed task-notification blocks (teammates), per-role named-field schema; compose full debate markdown + HTML; concatenate audio segments into final recording; package zips; cleanup.">
 
-### C4 — session-cost accounting + cleanup
+### C4 — close-out (token accounting + final artifacts + cleanup)
 
-Per-session token counts are not cleanly exposed via slash commands for Pro / Max / Team / Enterprise subscribers — the *Session block* at the top of `/usage` is intentionally hidden for subscribers (it's there for raw-API users only), and only **plan-usage bars** + activity stats are shown. So we report what's actually available:
+**Step 1 — token accounting (`/usage` delta + per-teammate summation, per §6).**
 
-1. **Before** sending the journalist message (i.e. at the start of C3), have each teammate run `/context` and reply with the current context-window token count. Capture these as the *baseline* (close to the end-of-debate state, since most generation has happened by then). Lead runs `/context` too.
-2. **After** the journalist finishes (start of C4), repeat `/context` for the lead and for the journalist (the only teammate whose context grew during C3). The other teammates' baselines from step 1 are still the right end-state for them.
-3. **For Pro / Max / Team / Enterprise subscribers**: also have the lead run `/usage` *once* before the debate and once at the end; note the plan-usage-bar percentages (e.g. "Sonnet: 14% → 21%"). The delta is the rough cost of this debate against the user's plan.
-4. **For raw-API users**: run `/usage` at the end on every teammate and capture the Session block's `Total cost` and `Total duration (API)` values.
-5. Write everything collected to `debate_events/<slug>/usage.json` with structure:
-   ```jsonc
-   {
-     "subscription_kind": "pro|max|team|enterprise|api",
-     "sessions": {
-       "Moderator": {"context_tokens_end": N, "context_delta_tokens": N, "session_cost_usd": N_or_null, "api_duration_s": N_or_null},
-       "A": {...}, "B": {...}, "C": {...}, "J": {...}
-     },
-     "plan_usage_delta": {"sonnet": "+7%", "opus": "+12%"},
-     "grand_total_context_tokens": N
-   }
-   ```
-6. Render the three articles to HTML and bundle the event outputs into zips so the user can share / archive:
+1a. Run `/usage` in the Moderator session. Parse the four named fields: `input_tokens`, `output_tokens`, `cache_read_input_tokens`, `cache_creation_input_tokens`. Compute the Moderator's debate-only delta = now − `usage_baseline.json` (captured at start of Phase A per the freshness-check step).
 
-   ```bash
-   bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_html.py \
-     --inputs "debate_events/<slug>/article_same_field.md,debate_events/<slug>/article_broader_field.md,debate_events/<slug>/article_general_stem.md"
+1b. For each teammate (A, B, C, J): the Moderator has been accumulating per-notification `usage` blocks in memory throughout the debate (one update per scientist response since B5_pre, one for J's response in C3). The four named fields are summed per teammate. Do NOT collapse into a bare `total`.
 
-   bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/package_outputs.py \
-     --event-dir "debate_events/<slug>/"
-   ```
+1c. Write `debate_events/<slug>/usage.json` with this exact schema (no `total_tokens` / `tokens_cumulative` / bare `tokens` fields):
 
-   Two zips land in the event folder: `<slug>_highlights.zip` (small, ready to share — articles + transcript + audience log + manifest + usage) and `<slug>_full.zip` (entire event folder for archival).
+```jsonc
+{
+  "Moderator": {
+    "input_tokens": <int>,
+    "output_tokens": <int>,
+    "cache_read_input_tokens": <int>,
+    "cache_creation_input_tokens": <int>,
+    "model": "<id from inputs.json::models.Moderator>",
+    "source": "lead session /usage before-after delta"
+  },
+  "A": {
+    "input_tokens": <int>,
+    "output_tokens": <int>,
+    "cache_read_input_tokens": <int>,
+    "cache_creation_input_tokens": <int>,
+    "model": "<id>",
+    "scientist_name": "<surname from team.json>",
+    "source": "task-notification stream sum"
+  },
+  "B": { /* same shape as A */ },
+  "C": { /* same shape as A */ },
+  "J": { /* same shape as A, scientist_name: null */ }
+}
+```
 
-7. AskUserQuestion: *"Outputs ready in `debate_events/<slug>/`. What would you like? A) preview articles in browser (open the three .html files), B) download the highlights zip (small, ready to share), C) download the full event zip (everything, archival), D) all of the above."* Surface the absolute paths to the user in the conversation so the file explorer / browser open works on local Claude Code; on claude.ai/code (web) the user must download before the sandbox expires.
+Lint after write: `grep -E 'total_tokens|tokens_cumulative|^[[:space:]]*"tokens"' debate_events/<slug>/usage.json` MUST match nothing. If it matches, abort close-out and surface a Moderator-bug error.
 
-8. Then ask the lead (yourself) to clean up the team per the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams#clean-up-the-team).
+**Step 2 — compose full debate markdown.**
+
+```bash
+bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/compose_full_event.py \
+  --event-dir "debate_events/<slug>/"
+```
+
+Produces `debate_events/<slug>/full_debate.md` — H1 title + topic + cast line + narrative Format paragraph + Format table + Contents/TOC + Self-introductions + The debate (10 stages as H3) + Journalist's write-up.
+
+**Step 3 — render HTML.**
+
+```bash
+bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_html.py \
+  --inputs "debate_events/<slug>/article_same_field.md,debate_events/<slug>/article_broader_field.md,debate_events/<slug>/article_general_stem.md,debate_events/<slug>/transcript.md,debate_events/<slug>/full_debate.md"
+```
+
+Produces 5 HTMLs in the event folder.
+
+**Step 4 — finalise audio.**
+
+```bash
+bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/render_audio.py \
+  --event-dir "debate_events/<slug>/" --final
+```
+
+Concatenates `audio_break_<NN>.mp3` segments (rendered incrementally during C1/C2 per decision #16) with the spoken disclaimer + filled methodology template + journalist articles audio → `debate_events/<slug>/recording.mp3` (96 kbps mp3 ≈ 57 MB for an 80-min debate). Also updates `recording.timings.json`. ~30–60 s with the per-segment files already on disk.
+
+**Step 5 — package zips.**
+
+```bash
+bash scripts/helper_scripts/run_python_cmd.sh debate/scripts/package_outputs.py \
+  --event-dir "debate_events/<slug>/"
+```
+
+Two zips land in the event folder: `<slug>_highlights.zip` (small, ready to share — articles + transcript + full_debate + audience log + manifest + usage + recording) and `<slug>_full.zip` (entire event folder for archival).
+
+**Step 6 — print cost summary to chat (per §6 step 6.9).**
+
+Print a table where every numeric column is labelled with its kind. Acceptable column labels: `input`, `output`, `cache-read`, `cache-creation`. Unacceptable: `tokens`, `total`, `cumulative`. Include the `model` column per row.
+
+| Role | model | input | output | cache-read | cache-creation |
+|------|-------|-------|--------|------------|-----------------|
+| Moderator | claude-opus-4-7[1m] | … | … | … | … |
+| A (`<surname>`) | claude-opus-4-7[1m] | … | … | … | … |
+| B (`<surname>`) | claude-opus-4-7[1m] | … | … | … | … |
+| C (`<surname>`) | claude-opus-4-7 | … | … | … | … |
+| J (Journalist) | claude-opus-4-7 | … | … | … | … |
+
+**Step 7 — surface outputs to user.**
+
+`AskUserQuestion`: *"Outputs ready in `debate_events/<slug>/`. What would you like? A) preview articles in browser (open the three .html files), B) preview full_debate.html (combined event), C) play recording.mp3, D) download the highlights zip, E) download the full event zip, F) all of the above."* Surface absolute paths so the file explorer / browser open works on local Claude Code; on claude.ai/code (web) the user must download before the sandbox expires.
+
+**Step 8 — cleanup.**
+
+Clean up the team per the [Agent Teams docs](https://code.claude.com/docs/en/agent-teams#clean-up-the-team). `team.json` stays on disk for archival — it's part of the post-mortem record.
 
 </section>
 

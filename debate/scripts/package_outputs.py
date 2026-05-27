@@ -19,12 +19,19 @@ import fire
 
 HIGHLIGHTS_PATTERNS = (
     "transcript.md",
+    "transcript.html",
+    "full_debate.md",
+    "full_debate.html",
     "audience.log",
     "manifest.json",
     "usage.json",
     "inputs.json",
+    "team.json",
+    "voice_map.json",
     "article_*.md",
     "article_*.html",
+    "recording.mp3",
+    "recording.timings.json",
 )
 
 
@@ -56,11 +63,25 @@ def _glob_full(event_dir: Path) -> list[Path]:
 
 
 def _write_zip(target: Path, files: list[Path], root: Path) -> Path:
+    """Write a zip atomically (temp file + os.replace).
+
+    Guards against concurrent re-runs and mid-write crashes leaving a partial
+    or corrupt zip behind.
+    """
     target.parent.mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED) as zf:
-        for f in files:
-            arcname = f.relative_to(root) if f.is_absolute() else f
-            zf.write(f, arcname=str(arcname))
+    tmp = target.with_name(target.name + ".partial")
+    try:
+        with zipfile.ZipFile(tmp, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+            for f in files:
+                arcname = f.relative_to(root) if f.is_absolute() else f
+                zf.write(f, arcname=str(arcname))
+        tmp.replace(target)
+    finally:
+        if tmp.exists():
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
     return target
 
 

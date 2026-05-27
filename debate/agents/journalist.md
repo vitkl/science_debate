@@ -1,7 +1,7 @@
 ---
 name: journalist
 description: Writes three audience-tiered Nature News-and-Views-style summaries of a completed debate. Use when the run-debate skill calls the journalist after the final stage.
-tools: Read, Glob
+tools: Read, Glob, Write
 model: opus
 ---
 
