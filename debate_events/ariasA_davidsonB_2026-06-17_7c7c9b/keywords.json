@@ -1,0 +1,56 @@
+{
+  "topic": "Is animal development driven primarily by hardwired, deterministic gene regulatory networks encoded in the genome (Davidson), or by self-organisation and dynamical-systems processes emerging from cell interactions (Martinez Arias)?",
+  "primary_terms": [
+    "gene regulatory network",
+    "self-organisation",
+    "animal development",
+    "cell fate specification",
+    "pattern formation",
+    "morphogenesis",
+    "embryonic patterning"
+  ],
+  "synonyms": [
+    "GRN",
+    "cis-regulatory network",
+    "regulatory genome",
+    "dynamical systems",
+    "emergence",
+    "gastruloid",
+    "organoid",
+    "positional information",
+    "reaction-diffusion",
+    "symmetry breaking",
+    "developmental gene network",
+    "Sonic hedgehog",
+    "Shh",
+    "Gli",
+    "Wnt",
+    "Notch",
+    "Nodal",
+    "BMP",
+    "Brachyury",
+    "Hox",
+    "Sox2",
+    "Gata",
+    "Otx",
+    "Pax6",
+    "bicoid"
+  ],
+  "opposing_terms": [
+    "deterministic genetic program",
+    "hardwired developmental program",
+    "stochastic",
+    "emergent",
+    "collective cell behaviour",
+    "tissue self-assembly",
+    "attractor"
+  ],
+  "publication_types": [
+    "editorial",
+    "letter",
+    "commentary",
+    "opinion",
+    "review",
+    "news"
+  ]
+}

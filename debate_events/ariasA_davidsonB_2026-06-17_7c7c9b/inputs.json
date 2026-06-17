@@ -1,0 +1,81 @@
+{
+  "event_slug": "ariasA_davidsonB_2026-06-17_7c7c9b",
+  "created_at": "2026-06-17T06:11:47",
+  "topic": "Is animal development driven primarily by hardwired, deterministic gene regulatory networks encoded in the genome (Davidson), or by self-organisation and dynamical-systems processes emerging from cell interactions (Martinez Arias)?",
+  "scientists": {
+    "A": {
+      "name": "Alfonso Martinez Arias",
+      "role": "presenter+opponent",
+      "title": "ICREA Research Professor",
+      "affiliation": "ICREA Research Professor, Systems Bioengineering, Universitat Pompeu Fabra, Barcelona",
+      "notes": "Previously 38 years at the University of Cambridge; champions the self-organisation / dynamical-systems view of development.",
+      "voice_gender_guess": "male",
+      "sourced": "websearch"
+    },
+    "B": {
+      "name": "Eric Davidson",
+      "role": "presenter+opponent",
+      "title": "Norman Chandler Professor of Cell Biology",
+      "affiliation": "Norman Chandler Professor of Cell Biology, Caltech, 1937–2015; represented faithfully from his published work",
+      "notes": "Architect of the gene regulatory network / cis-regulatory view of development. Deceased 2015; represented faithfully from his published work.",
+      "voice_gender_guess": "male",
+      "sourced": "websearch"
+    },
+    "C": {
+      "name": "James Briscoe",
+      "role": "reviewer",
+      "title": "Associate Research Director and Senior Group Leader",
+      "affiliation": "Associate Research Director and Senior Group Leader, Francis Crick Institute; Editor-in-Chief, Development",
+      "notes": "Editor-in-Chief of Development (since 2018); FRS, FMedSci.",
+      "voice_gender_guess": "male",
+      "sourced": "websearch"
+    }
+  },
+  "debate": {
+    "total_minutes": 80,
+    "give_collaborative_tone_to_presenters": false,
+    "journalist_word_budget": 550,
+    "allow_websearch_during_debate": false
+  },
+  "ingestion": {
+    "n_tier1_max": null,
+    "n_tier2a_full_max": 15,
+    "n_tier3_sample": 10,
+    "n_full_papers_cap": 15,
+    "global_briefing_word_cap": 80000,
+    "include_youtube": true,
+    "include_books": true,
+    "review_mode": "subagent",
+    "per_scientist_instruction": {
+      "Alfonso Martinez Arias": "Read this scientist's work in three tiers and stop when you have enough. Tier 1 - work directly about the debate topic AND by the scientist. Tier 2 - first/last-author papers (full text up to n_full_papers_cap) OR middle-author papers that match the debate topic (abstract only). Tier 3 - neither first/last-author nor topic-matching: a random seeded sample of n_tier3_sample abstracts.",
+      "Eric Davidson": "Read this scientist's work in three tiers and stop when you have enough. Tier 1 - work directly about the debate topic AND by the scientist. Tier 2 - first/last-author papers (full text up to n_full_papers_cap) OR middle-author papers that match the debate topic (abstract only). Tier 3 - neither first/last-author nor topic-matching: a random seeded sample of n_tier3_sample abstracts.",
+      "James Briscoe": "Read this scientist's work in three tiers and stop when you have enough. Tier 1 - work directly about the debate topic AND by the scientist. Tier 2 - first/last-author papers (full text up to n_full_papers_cap) OR middle-author papers that match the debate topic (abstract only). Tier 3 - neither first/last-author nor topic-matching: a random seeded sample of n_tier3_sample abstracts."
+    },
+    "custom_sources": {
+      "Alfonso Martinez Arias": [],
+      "Eric Davidson": [],
+      "James Briscoe": []
+    },
+    "dropped_source_ids": {
+      "Alfonso Martinez Arias": [],
+      "Eric Davidson": [],
+      "James Briscoe": []
+    }
+  },
+  "models": {
+    "Moderator": "opus",
+    "A": "opus",
+    "B": "opus",
+    "C": "opus",
+    "J": "opus"
+  },
+  "voice_map": {
+    "A": "bm_george",
+    "B": "am_michael",
+    "C": "bm_lewis",
+    "Moderator": "af_heart",
+    "Journalist": "bf_emma",
+    "Audience": "am_adam"
+  },
+  "complete": true
+}
