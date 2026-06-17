@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import datetime as _dt
 import json
+import os
 import re
 import shutil
 import sys
@@ -54,13 +55,67 @@ def _check_ffmpeg() -> None:
         raise RuntimeError(f"ffmpeg not on PATH. {MISSING_DEPS_HINT}")
 
 
-def _import_kokoro():
-    try:
-        from kokoro import KPipeline  # type: ignore
+def _onnx_asset(env_var: str, filename: str) -> str:
+    """Resolve a Kokoro-ONNX asset path (env override, else common cache dirs)."""
+    override = os.environ.get(env_var)
+    if override and Path(override).exists():
+        return override
+    for base in (Path.home() / ".cache" / "kokoro-onnx", Path("/root/.cache/kokoro-onnx")):
+        cand = base / filename
+        if cand.exists():
+            return str(cand)
+    # Fall through to the override (even if missing) so the error names a path.
+    return override or str(Path.home() / ".cache" / "kokoro-onnx" / filename)
 
-        return KPipeline
-    except ImportError as exc:
-        raise RuntimeError(f"kokoro not installed ({exc}). {MISSING_DEPS_HINT}") from exc
+
+class _OnnxPipeline:
+    """Drop-in replacement for kokoro.KPipeline backed by the ONNX runtime.
+
+    Used when the PyTorch weights cannot be fetched from HuggingFace (e.g. the
+    network policy blocks huggingface.co). The ONNX model + voices bin are
+    downloaded once from the kokoro-onnx GitHub release assets. Callable with the
+    same ``pipeline(text, voice=...)`` generator contract KPipeline exposes,
+    yielding ``(None, None, float32_waveform)`` triples at 24 kHz.
+    """
+
+    def __init__(self, lang_code: str = KOKORO_LANG) -> None:
+        from kokoro_onnx import Kokoro  # type: ignore
+
+        model = _onnx_asset("KOKORO_ONNX_MODEL", "kokoro-v1.0.onnx")
+        voices = _onnx_asset("KOKORO_ONNX_VOICES", "voices-v1.0.bin")
+        self._kokoro = Kokoro(model, voices)
+        # KOKORO_LANG "a" = American English, "b" = British. Map to espeak codes.
+        self._lang = "en-gb" if lang_code == "b" else "en-us"
+
+    def __call__(self, text: str, voice: str = "af_heart"):
+        samples, _sr = self._kokoro.create(text, voice=voice, speed=1.0, lang=self._lang)
+        yield None, None, samples
+
+
+def _import_kokoro():
+    """Return a pipeline factory: ``factory(lang_code=...)`` -> callable pipeline.
+
+    Prefers the PyTorch ``kokoro.KPipeline`` (downloads weights from HuggingFace).
+    If those weights are unreachable at construction time (offline / HF blocked by
+    the network policy), transparently falls back to the ONNX backend, which
+    fetches its assets from GitHub release assets instead.
+    """
+
+    def factory(lang_code: str = KOKORO_LANG):
+        try:
+            from kokoro import KPipeline  # type: ignore
+
+            return KPipeline(lang_code=lang_code)
+        except Exception as exc_torch:  # noqa: BLE001 — fall back on any failure
+            try:
+                return _OnnxPipeline(lang_code=lang_code)
+            except Exception as exc_onnx:  # noqa: BLE001
+                raise RuntimeError(
+                    f"Kokoro unavailable. PyTorch backend failed ({exc_torch}); "
+                    f"ONNX fallback failed ({exc_onnx}). {MISSING_DEPS_HINT}"
+                ) from exc_onnx
+
+    return factory
 
 
 def _import_audio_libs():
